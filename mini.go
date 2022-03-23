@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +14,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
+	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 )
-
-var version = "dev"
-
-const tabstop = 8
 
 var (
 	stdinfd  = int(os.Stdin.Fd())
@@ -28,7 +25,16 @@ var (
 
 var ErrQuitEditor = errors.New("quit editor")
 
+type EditorMode int8
+
+const (
+	InsertMode EditorMode = iota + 1
+	CommandMode
+)
+
 type Editor struct {
+	Mode EditorMode
+
 	// cursor coordinates
 	cx, cy int // cx is an index into Row.chars
 	rx     int // rx is an index into []rune(Row.render)
@@ -63,30 +69,12 @@ type Editor struct {
 	origTermios *unix.Termios
 }
 
-func enableRawMode() (*unix.Termios, error) {
-	t, err := unix.IoctlGetTermios(stdinfd, ioctlReadTermios)
-	if err != nil {
-		return nil, err
-	}
-	raw := *t // make a copy to avoid mutating the original
-	raw.Iflag &^= unix.BRKINT | unix.INPCK | unix.ISTRIP | unix.IXON
-	// FIXME: figure out why this is not needed
-	// termios.Oflag &^= unix.OPOST
-	raw.Cflag |= unix.CS8
-	raw.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG | unix.IEXTEN
-	raw.Cc[unix.VMIN] = 0
-	raw.Cc[unix.VTIME] = 1
-	if err := unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, &raw); err != nil {
-		return nil, err
-	}
-	return t, nil
-}
-
 func (e *Editor) Init() error {
 	termios, err := enableRawMode()
 	if err != nil {
 		return err
 	}
+
 	e.origTermios = termios
 	ws, err := unix.IoctlGetWinsize(stdoutfd, unix.TIOCGWINSZ)
 	if err != nil || ws.Col == 0 {
@@ -95,35 +83,35 @@ func (e *Editor) Init() error {
 		if _, err = os.Stdout.Write([]byte("\x1b[999C\x1b[999B")); err != nil {
 			return err
 		}
-		if row, col, err := getCursorPosition(); err == nil {
-			e.screenRows = row
-			e.screenCols = col
-			return nil
+
+		row, col, err := getCursorPosition()
+		if err != nil {
+			return err
 		}
-		return err
+
+		e.screenRows = row
+		e.screenCols = col
+
+		return nil
 	}
+
 	e.screenRows = int(ws.Row) - 2 // make room for status-bar and message-bar
 	e.screenCols = int(ws.Col)
+
+	e.Mode = CommandMode
 	return nil
 }
 
-func (e *Editor) Close() error {
-	if e.origTermios == nil {
-		return fmt.Errorf("raw mode is not enabled")
-	}
-	// restore original termios.
-	return unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, e.origTermios)
-}
-
-type key int32
+type Key int32
 
 // Assign an arbitrary large number to the following special keys
 // to avoid conflicts with the normal keys.
 const (
-	keyEnter     key = 10
-	keyBackspace key = 127
+	keyEnter     Key = 10
+	keyBackspace Key = 127
+	keyEscape    Key = '\x1b'
 
-	keyArrowLeft key = iota + 1000
+	keyArrowLeft Key = iota + 1000
 	keyArrowRight
 	keyArrowUp
 	keyArrowDown
@@ -134,83 +122,6 @@ const (
 	keyEnd
 )
 
-// Syntax highlight enums
-const (
-	hlNormal uint8 = iota
-	hlComment
-	hlMlComment
-	hlKeyword1
-	hlKeyword2
-	hlString
-	hlNumber
-	hlMatch
-)
-
-const (
-	HL_HIGHLIGHT_NUMBERS = 1 << iota
-	HL_HIGHLIGHT_STRINGS
-)
-
-type EditorSyntax struct {
-	// Name of the filetype displayed in the status bar.
-	filetype string
-	// List of patterns to match a filename against.
-	filematch []string
-	// List of keywords to highlight. Use '|' suffix for keyword2 highlight.
-	keywords []string
-	// scs is a single-line comment start pattern (e.g. "//" for golang).
-	// set to an empty string if comment highlighting is not needed.
-	scs string
-	// mcs is a multi-line comment start pattern (e.g. "/*" for golang).
-	mcs string
-	// mce is a multi-line comment end pattern (e.g. "*/" for golang).
-	mce string
-	// Bit field that contains flags for whether to highlight numbers and
-	// whether to highlight strings.
-	flags int
-}
-
-var HLDB = []*EditorSyntax{
-	{
-		filetype:  "c",
-		filematch: []string{".c", ".h", "cpp", ".cc"},
-		keywords: []string{
-			"switch", "if", "while", "for", "break", "continue", "return",
-			"else", "struct", "union", "typedef", "static", "enum", "class",
-			"case",
-
-			"int|", "long|", "double|", "float|", "char|", "unsigned|",
-			"signed|", "void|",
-		},
-		scs:   "//",
-		mcs:   "/*",
-		mce:   "*/",
-		flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
-	},
-	{
-		filetype:  "go",
-		filematch: []string{".go"},
-		keywords: []string{
-			"break", "default", "func", "interface", "select", "case", "defer",
-			"go", "map", "struct", "chan", "else", "goto", "package", "switch",
-			"const", "fallthrough", "if", "range", "type", "continue", "for",
-			"import", "return", "var",
-
-			"append|", "bool|", "byte|", "cap|", "close|", "complex|",
-			"complex64|", "complex128|", "error|", "uint16|", "copy|", "false|",
-			"float32|", "float64|", "imag|", "int|", "int8|", "int16|",
-			"uint32|", "int32|", "int64|", "iota|", "len|", "make|", "new|",
-			"nil|", "panic|", "uint64|", "print|", "println|", "real|",
-			"recover|", "rune|", "string|", "true|", "uint|", "uint8|",
-			"uintptr|",
-		},
-		scs:   "//",
-		mcs:   "/*",
-		mce:   "*/",
-		flags: HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
-	},
-}
-
 type Row struct {
 	// Index within the file.
 	idx int
@@ -219,7 +130,7 @@ type Row struct {
 	// Actual chracters to draw on the screen.
 	render string
 	// Syntax highlight value for each rune in the render string.
-	hl []uint8
+	hl []SyntaxHL
 	// Indicates whether this row has unclosed multiline comment.
 	hasUnclosedComment bool
 }
@@ -236,89 +147,72 @@ func die(err error) {
 	os.Exit(1)
 }
 
+var escapeCodeToKey = map[string]Key{
+	"\x1b[A":  keyArrowUp,
+	"\x1b[B":  keyArrowDown,
+	"\x1b[C":  keyArrowRight,
+	"\x1b[D":  keyArrowLeft,
+	"\x1b[1~": keyHome,
+	"\x1b[7~": keyHome,
+	"\x1b[H":  keyHome,
+	"\x1bOH":  keyHome,
+	"\x1b[4~": keyEnd,
+	"\x1b[8~": keyEnd,
+	"\x1b[F":  keyEnd,
+	"\x1bOF":  keyEnd,
+	"\x1b[3~": keyDelete,
+	"\x1b[5~": keyPageUp,
+	"\x1b[6~": keyPageDown,
+}
+
 // readKey reads a key press input from stdin.
-func readKey() (key, error) {
+func readKey() (Key, error) {
 	buf := make([]byte, 4)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		if n > 0 {
-			buf = bytes.TrimRightFunc(buf, func(r rune) bool { return r == 0 })
-			switch {
-			case bytes.Equal(buf, []byte("\x1b[A")):
-				return keyArrowUp, nil
-			case bytes.Equal(buf, []byte("\x1b[B")):
-				return keyArrowDown, nil
-			case bytes.Equal(buf, []byte("\x1b[C")):
-				return keyArrowRight, nil
-			case bytes.Equal(buf, []byte("\x1b[D")):
-				return keyArrowLeft, nil
-			case bytes.Equal(buf, []byte("\x1b[1~")), bytes.Equal(buf, []byte("\x1b[7~")),
-				bytes.Equal(buf, []byte("\x1b[H")), bytes.Equal(buf, []byte("\x1bOH")):
-				return keyHome, nil
-			case bytes.Equal(buf, []byte("\x1b[4~")), bytes.Equal(buf, []byte("\x1b[8~")),
-				bytes.Equal(buf, []byte("\x1b[F")), bytes.Equal(buf, []byte("\x1bOF")):
-				return keyEnd, nil
-			case bytes.Equal(buf, []byte("\x1b[3~")):
-				return keyDelete, nil
-			case bytes.Equal(buf, []byte("\x1b[5~")):
-				return keyPageUp, nil
-			case bytes.Equal(buf, []byte("\x1b[6~")):
-				return keyPageDown, nil
 
-			default:
-				return key(buf[0]), nil
-			}
+		if n == 0 {
+			continue
 		}
+
+		buf = bytes.TrimRightFunc(buf, func(r rune) bool { return r == 0 })
+		key, ok := escapeCodeToKey[string(buf)]
+		if !ok {
+			return Key(buf[0]), nil
+		}
+
+		return key, nil
 	}
 }
 
-func (e *Editor) MoveCursor(k key) {
-	switch k {
-	case keyArrowUp:
-		if e.cy != 0 {
-			e.cy--
-		}
-	case keyArrowDown:
-		if e.cy < len(e.rows) {
-			e.cy++
-		}
-	case keyArrowLeft:
-		if e.cx != 0 {
-			e.cx--
-		} else if e.cy > 0 {
-			e.cy--
-			e.cx = len(e.rows[e.cy].chars)
-		}
-	case keyArrowRight:
-		linelen := -1
-		if e.cy < len(e.rows) {
-			linelen = len(e.rows[e.cy].chars)
-		}
-		if linelen >= 0 && e.cx < linelen {
-			e.cx++
-		} else if linelen >= 0 && e.cx == linelen {
-			e.cy++
-			e.cx = 0
-		}
-	}
+type Direction int8
 
-	// If the cursor ends up past the end of the line it's on
-	// put the cursor at the end of the line.
-	var linelen int
-	if e.cy < len(e.rows) {
-		linelen = len(e.rows[e.cy].chars)
-	}
-	if e.cx > linelen {
-		e.cx = linelen
-	}
+const (
+	DirectionUp Direction = iota + 1
+	DirectionDown
+	DirectionLeft
+	DirectionRight
+)
+
+func RepositionCursor() {
+	os.Stdout.WriteString(RepositionCursorCode)
 }
 
-// The number of times the user needs to press Ctrl-Q to quit
-// the editor with unsaved changes.
-const quitTimes = 3
+func ClearScreen() {
+	os.Stdout.WriteString(ClearScreenCode)
+}
+
+type EscapeCodes string
+
+const (
+	RepositionCursorCode = "\x1b[H"
+	ResetColorCode       = "\x1b[39m"
+	ClearLineCode        = "\x1b[K"
+	ClearScreenCode      = "\x1b[2J"
+)
 
 // ProcessKey processes a key read from stdin.
 // Returns errQuitEditor when user requests to quit.
@@ -327,91 +221,11 @@ func (e *Editor) ProcessKey() error {
 	if err != nil {
 		return err
 	}
-	switch k {
-	case keyEnter:
-		e.InsertNewline()
 
-	case key(ctrl('q')):
-		// warn the user about unsaved changes.
-		if e.dirty > 0 && e.quitCounter < quitTimes {
-			e.SetStatusMessage(
-				"WARNING!!! File has unsaved changes. Press Ctrl-Q %d more times to quit.", quitTimes-e.quitCounter)
-			e.quitCounter++
-			return nil
-		}
-		os.Stdout.WriteString("\x1b[2J") // clear the screen
-		os.Stdout.WriteString("\x1b[H")  // reposition the cursor
-		return ErrQuitEditor
-
-	case key(ctrl('s')):
-		n, err := e.Save()
-		if err != nil {
-			if err == ErrPromptCanceled {
-				e.SetStatusMessage("Save aborted")
-			} else {
-				e.SetStatusMessage("Can't save! I/O error: %s", err.Error())
-			}
-		} else {
-			e.SetStatusMessage("%d bytes written to disk", n)
-		}
-
-	case key(ctrl('f')):
-		err := e.Find()
-		if err != nil {
-			if err == ErrPromptCanceled {
-				e.SetStatusMessage("")
-			} else {
-				return err
-			}
-		}
-
-	case keyHome:
-		e.cx = 0
-
-	case keyEnd:
-		if e.cy < len(e.rows) {
-			e.cx = len(e.rows[e.cy].chars)
-		}
-
-	case keyBackspace, key(ctrl('h')):
-		e.DeleteChar()
-
-	case keyDelete:
-		if e.cy == len(e.rows)-1 && e.cx == len(e.rows[e.cy].chars) {
-			// cursor is on the last row and one past the last character,
-			// no more character to delete to the right.
-			break
-		}
-		e.MoveCursor(keyArrowRight)
-		e.DeleteChar()
-
-	case keyPageUp:
-		// position cursor at the top first.
-		e.cy = e.rowOffset
-		// then scroll up an entire screen worth.
-		for i := 0; i < e.screenRows; i++ {
-			e.MoveCursor(keyArrowUp)
-		}
-	case keyPageDown:
-		// position cursor at the bottom first.
-		e.cy = e.rowOffset + e.screenRows - 1
-		if e.cy > len(e.rows) {
-			e.cy = len(e.rows)
-		}
-		// then scroll down an entire screen worth.
-		for i := 0; i < e.screenRows; i++ {
-			e.MoveCursor(keyArrowDown)
-		}
-
-	case keyArrowUp, keyArrowDown, keyArrowLeft, keyArrowRight:
-		e.MoveCursor(k)
-
-	case key(ctrl('l')), key('\x1b'):
-		break // no op
-
-	default:
-		e.InsertChar(rune(k))
+	if err := e.Keymapping(k); err != nil {
+		return err
 	}
+
 	// Reset quitCounter to zero if user pressed any key other than Ctrl-Q.
 	e.quitCounter = 0
 	return nil
@@ -422,7 +236,7 @@ func (e *Editor) drawRows(b *strings.Builder) {
 		filerow := y + e.rowOffset
 		if filerow >= len(e.rows) {
 			if len(e.rows) == 0 && y == e.screenRows/3 {
-				welcomeMsg := fmt.Sprintf("Mini editor -- version %s", version)
+				welcomeMsg := fmt.Sprintf("Mini editor -- version %s", Version)
 				if runewidth.StringWidth(welcomeMsg) > e.screenCols {
 					welcomeMsg = utf8Slice(welcomeMsg, 0, e.screenCols)
 				}
@@ -442,7 +256,7 @@ func (e *Editor) drawRows(b *strings.Builder) {
 		} else {
 			var (
 				line string
-				hl   []uint8
+				hl   []SyntaxHL
 			)
 			if runewidth.StringWidth(e.rows[filerow].render) > e.colOffset {
 				line = utf8Slice(
@@ -477,7 +291,7 @@ func (e *Editor) drawRows(b *strings.Builder) {
 					}
 					b.WriteRune(r)
 				} else {
-					color := syntaxToColor(hl[i])
+					color := SyntaxToColor(hl[i])
 					if color != currentColor {
 						currentColor = color
 						b.WriteString(fmt.Sprintf("\x1b[%dm", color))
@@ -485,9 +299,10 @@ func (e *Editor) drawRows(b *strings.Builder) {
 					b.WriteRune(r)
 				}
 			}
-			b.WriteString("\x1b[39m") // reset to normal color
+			b.WriteString(ResetColorCode)
 		}
-		b.Write([]byte("\x1b[K")) // clear the line
+
+		b.Write([]byte(ClearLineCode))
 		b.Write([]byte("\r\n"))
 	}
 }
@@ -503,7 +318,16 @@ func (e *Editor) drawStatusBar(b *strings.Builder) {
 	if e.dirty > 0 {
 		dirtyStatus = "(modified)"
 	}
-	lmsg := fmt.Sprintf("%.20s - %d lines %s", filename, len(e.rows), dirtyStatus)
+
+	mode := ""
+	switch e.Mode {
+	case InsertMode:
+		mode = "-- INSERT MODE --"
+	case CommandMode:
+		mode = "-- COMMAND MODE --"
+	}
+
+	lmsg := fmt.Sprintf("%.20s - %d lines %s %s", filename, len(e.rows), dirtyStatus, mode)
 	if runewidth.StringWidth(lmsg) > e.screenCols {
 		lmsg = runewidth.Truncate(lmsg, e.screenCols, "...")
 	}
@@ -522,6 +346,7 @@ func (e *Editor) drawStatusBar(b *strings.Builder) {
 		b.Write([]byte(" "))
 		l++
 	}
+
 	b.Write([]byte("\r\n"))
 }
 
@@ -546,7 +371,7 @@ func rowCxToRx(row *Row, cx int) int {
 	rx := 0
 	for _, r := range row.chars[:cx] {
 		if r == '\t' {
-			rx += (tabstop) - (rx % tabstop)
+			rx += (Tabstop) - (rx % Tabstop)
 		} else {
 			rx += runewidth.RuneWidth(r)
 		}
@@ -555,10 +380,14 @@ func rowCxToRx(row *Row, cx int) int {
 }
 
 func rowRxToCx(row *Row, rx int) int {
+	if len(row.chars) == 0 {
+		return 0
+	}
+
 	curRx := 0
 	for i, r := range row.chars {
 		if r == '\t' {
-			curRx += (tabstop) - (curRx % tabstop)
+			curRx += (Tabstop) - (curRx % Tabstop)
 		} else {
 			curRx += runewidth.RuneWidth(r)
 		}
@@ -567,7 +396,7 @@ func rowRxToCx(row *Row, rx int) int {
 			return i
 		}
 	}
-	panic("unreachable")
+	panic(fmt.Sprintf("unreachable, row=%v, rx=%d", row, rx))
 }
 
 func (e *Editor) scroll() {
@@ -595,6 +424,8 @@ func (e *Editor) scroll() {
 
 // Render refreshes the screen.
 func (e *Editor) Render() {
+	e.WrapCursorY()
+	e.WrapCursorX()
 	e.scroll()
 
 	var b strings.Builder
@@ -628,15 +459,6 @@ func getCursorPosition() (row, col int, err error) {
 	return
 }
 
-func (e *Editor) rowsToString() string {
-	var b strings.Builder
-	for _, row := range e.rows {
-		b.WriteString(string(row.chars))
-		b.WriteRune('\n')
-	}
-	return b.String()
-}
-
 var ErrPromptCanceled = fmt.Errorf("user canceled the input prompt")
 
 // Prompt shows the given prompt in the status bar and get user input
@@ -646,50 +468,59 @@ var ErrPromptCanceled = fmt.Errorf("user canceled the input prompt")
 // if the user cancels the input.
 // It takes an optional callback function, which takes the query string and
 // the last key pressed.
-func (e *Editor) Prompt(prompt string, cb func(query string, k key)) (string, error) {
-	var b strings.Builder
+// Returns the full string when entered, whether it was canceled, and an error
+func (e *Editor) Prompt(prompt string, cb func(query string, k Key)) (string, bool, error) {
+	var text []rune
 	for {
-		e.SetStatusMessage(prompt, b.String())
+		e.SetStatusMessage(prompt, string(text))
 		e.Render()
 
 		k, err := readKey()
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
-		if k == keyDelete || k == keyBackspace || k == key(ctrl('h')) {
-			if b.Len() > 0 {
-				bytes := []byte(b.String())
-				_, size := utf8.DecodeLastRune(bytes)
-				b.Reset()
-				b.WriteString(string(bytes[:len(bytes)-size]))
+
+		switch k {
+		case keyDelete, keyBackspace, Key(ctrl('h')):
+			log.Printf("text4: %v", text)
+			if len(text) != 0 {
+				text = text[:len(text)-1]
 			}
-		} else if k == key('\x1b') {
+		case keyEscape:
 			e.SetStatusMessage("")
 			if cb != nil {
-				cb(b.String(), k)
+				cb(string(text), k)
 			}
-			return "", ErrPromptCanceled
-		} else if k == keyEnter {
-			if b.Len() > 0 {
+
+			return "", true, nil
+		case keyEnter:
+			if len(text) != 0 {
 				e.SetStatusMessage("")
 				if cb != nil {
-					cb(b.String(), k)
+					cb(string(text), k)
 				}
-				return b.String(), nil
+
+				return string(text), false, nil
 			}
-		} else if !unicode.IsControl(rune(k)) && !isArrowKey(k) && unicode.IsPrint(rune(k)) {
-			b.WriteRune(rune(k))
+		default:
+
+			if isPrintable(k) {
+				text = append(text, rune(k))
+			}
 		}
 
 		if cb != nil {
-			cb(b.String(), k)
+			cb(string(text), k)
 		}
 	}
 }
 
-func isArrowKey(k key) bool {
-	return k == keyArrowUp || k == keyArrowRight ||
-		k == keyArrowDown || k == keyArrowLeft
+func isPrintable(k Key) bool {
+	return !unicode.IsControl(rune(k)) && unicode.IsPrint(rune(k)) && !isArrowKey(k)
+}
+
+func isArrowKey(k Key) bool {
+	return k == keyArrowUp || k == keyArrowRight || k == keyArrowDown || k == keyArrowLeft
 }
 
 func (e *Editor) Save() (int, error) {
@@ -697,10 +528,14 @@ func (e *Editor) Save() (int, error) {
 	// actual file the user wants to overwrite, checking errors through
 	// the whole process.
 	if len(e.filename) == 0 {
-		fname, err := e.Prompt("Save as: %s (ESC to cancel)", nil)
+		fname, cancelled, err := e.Prompt("Save as: %s (ESC to cancel)", nil)
 		if err != nil {
 			return 0, err
 		}
+		if cancelled {
+			return 0, ErrPromptCanceled
+		}
+
 		e.filename = fname
 		e.selectSyntaxHighlight()
 	}
@@ -716,6 +551,14 @@ func (e *Editor) Save() (int, error) {
 	}
 	e.dirty = 0
 	return n, nil
+}
+func (e *Editor) rowsToString() string {
+	var b strings.Builder
+	for _, row := range e.rows {
+		b.WriteString(string(row.chars))
+		b.WriteRune('\n')
+	}
+	return b.String()
 }
 
 // OpenFile opens a file with the given filename.
@@ -742,25 +585,6 @@ func (e *Editor) OpenFile(filename string) error {
 	return nil
 }
 
-func (e *Editor) InsertRow(at int, chars string) {
-	if at < 0 || at > len(e.rows) {
-		return
-	}
-	row := &Row{chars: []rune(chars)}
-	row.idx = at
-	if at > 0 {
-		row.hasUnclosedComment = e.rows[at-1].hasUnclosedComment
-	}
-	e.updateRow(row)
-
-	e.rows = append(e.rows, &Row{}) // grow the buffer
-	copy(e.rows[at+1:], e.rows[at:])
-	for i := at + 1; i < len(e.rows); i++ {
-		e.rows[i].idx++
-	}
-	e.rows[at] = row
-}
-
 func (e *Editor) InsertNewline() {
 	if e.cx == 0 {
 		e.InsertRow(e.cy, "")
@@ -781,17 +605,18 @@ func (e *Editor) updateRow(row *Row) {
 	var b strings.Builder
 	col := 0
 	for _, r := range row.chars {
-		if r == '\t' {
-			// each tab must advance the cursor forward at least one column
+		if r != '\t' {
+			b.WriteRune(r)
+			continue
+		}
+
+		// each tab must advance the cursor forward at least one column
+		b.WriteRune(' ')
+		col++
+		// append spaces until we get to a tab stop
+		for col%Tabstop != 0 {
 			b.WriteRune(' ')
 			col++
-			// append spaces until we get to a tab stop
-			for col%tabstop != 0 {
-				b.WriteRune(' ')
-				col++
-			}
-		} else {
-			b.WriteRune(r)
 		}
 	}
 	row.render = b.String()
@@ -803,7 +628,7 @@ func isSeparator(r rune) bool {
 }
 
 func (e *Editor) updateHighlight(row *Row) {
-	row.hl = make([]uint8, utf8.RuneCountInString(row.render))
+	row.hl = make([]SyntaxHL, utf8.RuneCountInString(row.render))
 	for i := range row.hl {
 		row.hl[i] = hlNormal
 	}
@@ -940,25 +765,6 @@ func (e *Editor) updateHighlight(row *Row) {
 	}
 }
 
-func syntaxToColor(hl uint8) int {
-	switch hl {
-	case hlComment, hlMlComment:
-		return 90
-	case hlKeyword1:
-		return 94
-	case hlKeyword2:
-		return 96
-	case hlString:
-		return 36
-	case hlNumber:
-		return 33
-	case hlMatch:
-		return 32
-	default:
-		return 37
-	}
-}
-
 func (e *Editor) selectSyntaxHighlight() {
 	e.syntax = nil
 	if len(e.filename) == 0 {
@@ -982,153 +788,6 @@ func (e *Editor) selectSyntaxHighlight() {
 	}
 }
 
-func (row *Row) insertChar(at int, c rune) {
-	if at < 0 || at > len(row.chars) {
-		at = len(row.chars)
-	}
-	row.chars = append(row.chars, 0) // make room
-	copy(row.chars[at+1:], row.chars[at:])
-	row.chars[at] = c
-}
-
-func (row *Row) appendChars(chars []rune) {
-	row.chars = append(row.chars, chars...)
-}
-
-func (row *Row) deleteChar(at int) {
-	if at < 0 || at >= len(row.chars) {
-		return
-	}
-	row.chars = append(row.chars[:at], row.chars[at+1:]...)
-}
-
-func (e *Editor) InsertChar(c rune) {
-	if e.cy == len(e.rows) {
-		e.InsertRow(len(e.rows), "")
-	}
-	row := e.rows[e.cy]
-	row.insertChar(e.cx, c)
-	e.updateRow(row)
-	e.cx++
-	e.dirty++
-}
-
-func (e *Editor) DeleteChar() {
-	if e.cy == len(e.rows) {
-		return
-	}
-	if e.cx == 0 && e.cy == 0 {
-		return
-	}
-	row := e.rows[e.cy]
-	if e.cx > 0 {
-		row.deleteChar(e.cx - 1)
-		e.updateRow(row)
-		e.cx--
-		e.dirty++
-	} else {
-		prevRow := e.rows[e.cy-1]
-		e.cx = len(prevRow.chars)
-		prevRow.appendChars(row.chars)
-		e.updateRow(prevRow)
-		e.DeleteRow(e.cy)
-		e.cy--
-	}
-}
-
-func (e *Editor) DeleteRow(at int) {
-	if at < 0 || at >= len(e.rows) {
-		return
-	}
-	e.rows = append(e.rows[:at], e.rows[at+1:]...)
-	for i := at; i < len(e.rows); i++ {
-		e.rows[i].idx--
-	}
-	e.dirty++
-}
-
-/*** find ***/
-
-func (e *Editor) Find() error {
-	savedCx := e.cx
-	savedCy := e.cy
-	savedColOffset := e.colOffset
-	savedRowOffset := e.rowOffset
-
-	lastMatchRowIndex := -1 // remember the last match row
-	searchDirection := 1    // 1 = forward, -1 = backward
-
-	savedHlRowIndex := -1
-	savedHl := []uint8(nil)
-
-	onKeyPress := func(query string, k key) {
-		if len(savedHl) > 0 {
-			copy(e.rows[savedHlRowIndex].hl, savedHl)
-			savedHl = []uint8(nil)
-		}
-		switch k {
-		case keyEnter, key('\x1b'):
-			lastMatchRowIndex = -1
-			searchDirection = 1
-			return
-		case keyArrowRight, keyArrowDown:
-			searchDirection = 1
-		case keyArrowLeft, keyArrowUp:
-			searchDirection = -1
-		default:
-			// unless an arrow key was pressed, we'll reset.
-			lastMatchRowIndex = -1
-			searchDirection = 1
-		}
-
-		if lastMatchRowIndex == -1 {
-			searchDirection = 1
-		}
-
-		current := lastMatchRowIndex
-
-		// search for query and set e.cy, e.cx, e.rowOffset values.
-		for i := 0; i < len(e.rows); i++ {
-			current += searchDirection
-			switch current {
-			case -1:
-				current = len(e.rows) - 1
-			case len(e.rows):
-				current = 0
-			}
-
-			row := e.rows[current]
-			rx := strings.Index(row.render, query)
-			if rx != -1 {
-				lastMatchRowIndex = current
-				e.cy = current
-				e.cx = rowRxToCx(row, rx)
-				// set rowOffset to bottom so that the next scroll() will scroll
-				// upwards and the matching line will be at the top of the screen
-				e.rowOffset = len(e.rows)
-				// highlight the matched string
-				savedHlRowIndex = current
-				savedHl = make([]uint8, len(row.hl))
-				copy(savedHl, row.hl)
-				for i := 0; i < utf8.RuneCountInString(query); i++ {
-					row.hl[rx+i] = hlMatch
-				}
-				break
-			}
-		}
-	}
-
-	_, err := e.Prompt("Search: %s (ESC = cancel | Enter = confirm | Arrows = prev/next)", onKeyPress)
-	// restore cursor position when the user cancels search
-	if err == ErrPromptCanceled {
-		e.cx = savedCx
-		e.cy = savedCy
-		e.colOffset = savedColOffset
-		e.rowOffset = savedRowOffset
-	}
-	return err
-}
-
 func main() {
 	var editor Editor
 
@@ -1144,6 +803,12 @@ func main() {
 		}
 	}
 
+	f, err := enableLogs()
+	if err != nil {
+		die(err)
+	}
+	defer f.Close()
+
 	editor.SetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find")
 
 	for {
@@ -1155,4 +820,46 @@ func main() {
 			die(err)
 		}
 	}
+}
+
+var LogFile = "mini.log"
+
+func enableLogs() (*os.File, error) {
+	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return nil, errors.Wrapf(err, "opening file. filename=%s", LogFile)
+	}
+
+	log.SetOutput(f)
+	log.Println("Logging begin")
+
+	return f, nil
+}
+
+func (e *Editor) Close() error {
+	if e.origTermios == nil {
+		return fmt.Errorf("raw mode is not enabled")
+	}
+
+	// restore original termios.
+	return unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, e.origTermios)
+}
+
+func enableRawMode() (*unix.Termios, error) {
+	t, err := unix.IoctlGetTermios(stdinfd, ioctlReadTermios)
+	if err != nil {
+		return nil, err
+	}
+	raw := *t // make a copy to avoid mutating the original
+	raw.Iflag &^= unix.BRKINT | unix.INPCK | unix.ISTRIP | unix.IXON
+	// FIXME: figure out why this is not needed
+	// termios.Oflag &^= unix.OPOST
+	raw.Cflag |= unix.CS8
+	raw.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG | unix.IEXTEN
+	raw.Cc[unix.VMIN] = 0
+	raw.Cc[unix.VTIME] = 1
+	if err := unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, &raw); err != nil {
+		return nil, err
+	}
+	return t, nil
 }
