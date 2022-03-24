@@ -231,80 +231,93 @@ func (e *Editor) ProcessKey() error {
 	return nil
 }
 
+func (e *Editor) displayWelcomeMessage(b *strings.Builder) {
+	welcomeMsg := fmt.Sprintf("Mini editor -- version %s", Version)
+	if runewidth.StringWidth(welcomeMsg) > e.screenCols {
+		welcomeMsg = utf8Slice(welcomeMsg, 0, e.screenCols)
+	}
+	padding := (e.screenCols - runewidth.StringWidth(welcomeMsg)) / 2
+	if padding > 0 {
+		b.Write([]byte("~"))
+		padding--
+	}
+	for ; padding > 0; padding-- {
+		b.Write([]byte(" "))
+	}
+
+	b.WriteString(welcomeMsg)
+}
+
 func (e *Editor) drawRows(b *strings.Builder) {
 	for y := 0; y < e.screenRows; y++ {
-		filerow := y + e.rowOffset
-		if filerow >= len(e.rows) {
-			if len(e.rows) == 0 && y == e.screenRows/3 {
-				welcomeMsg := fmt.Sprintf("Mini editor -- version %s", Version)
-				if runewidth.StringWidth(welcomeMsg) > e.screenCols {
-					welcomeMsg = utf8Slice(welcomeMsg, 0, e.screenCols)
-				}
-				padding := (e.screenCols - runewidth.StringWidth(welcomeMsg)) / 2
-				if padding > 0 {
-					b.Write([]byte("~"))
-					padding--
-				}
-				for ; padding > 0; padding-- {
-					b.Write([]byte(" "))
-				}
-				b.WriteString(welcomeMsg)
-			} else {
-				b.Write([]byte("~"))
-			}
-
-		} else {
-			var (
-				line string
-				hl   []SyntaxHL
-			)
-			if runewidth.StringWidth(e.rows[filerow].render) > e.colOffset {
-				line = utf8Slice(
-					e.rows[filerow].render,
-					e.colOffset,
-					utf8.RuneCountInString(e.rows[filerow].render))
-				hl = e.rows[filerow].hl[e.colOffset:]
-			}
-			if runewidth.StringWidth(line) > e.screenCols {
-				line = runewidth.Truncate(line, e.screenCols, "")
-				hl = hl[:utf8.RuneCountInString(line)]
-			}
-			currentColor := -1 // keep track of color to detect color change
-			for i, r := range []rune(line) {
-				if unicode.IsControl(r) {
-					// deal with non-printable characters (e.g. Ctrl-A)
-					sym := '?'
-					if r < 26 {
-						sym = '@' + r
-					}
-					b.WriteString("\x1b[7m") // use inverted colors
-					b.WriteRune(sym)
-					b.WriteString("\x1b[m") // reset all formatting
-					if currentColor != -1 {
-						// restore the current color
-						b.WriteString(fmt.Sprintf("\x1b[%dm", currentColor))
-					}
-				} else if hl[i] == hlNormal {
-					if currentColor != -1 {
-						currentColor = -1
-						b.WriteString("\x1b[39m")
-					}
-					b.WriteRune(r)
-				} else {
-					color := SyntaxToColor(hl[i])
-					if color != currentColor {
-						currentColor = color
-						b.WriteString(fmt.Sprintf("\x1b[%dm", color))
-					}
-					b.WriteRune(r)
-				}
-			}
-			b.WriteString(ResetColorCode)
-		}
+		e.drawRow(b, y)
 
 		b.Write([]byte(ClearLineCode))
 		b.Write([]byte("\r\n"))
 	}
+}
+
+func (e *Editor) drawRow(b *strings.Builder, y int) {
+	filerow := y + e.rowOffset
+	if filerow >= len(e.rows) {
+		// The display message should not be here, you should not be
+		// able to get back to it once passed
+		if len(e.rows) == 0 && y == e.screenRows/3 {
+			e.displayWelcomeMessage(b)
+		} else {
+			b.Write([]byte("~"))
+		}
+
+		return
+	}
+
+	var (
+		line string
+		hl   []SyntaxHL
+	)
+	if runewidth.StringWidth(e.rows[filerow].render) > e.colOffset {
+		line = utf8Slice(
+			e.rows[filerow].render,
+			e.colOffset,
+			utf8.RuneCountInString(e.rows[filerow].render))
+		hl = e.rows[filerow].hl[e.colOffset:]
+	}
+	if runewidth.StringWidth(line) > e.screenCols {
+		line = runewidth.Truncate(line, e.screenCols, "")
+		hl = hl[:utf8.RuneCountInString(line)]
+	}
+
+	currentColor := -1 // keep track of color to detect color change
+	for i, r := range line {
+		if unicode.IsControl(r) {
+			// deal with non-printable characters (e.g. Ctrl-A)
+			sym := '?'
+			if r < 26 {
+				sym = '@' + r
+			}
+			b.WriteString("\x1b[7m") // use inverted colors
+			b.WriteRune(sym)
+			b.WriteString("\x1b[m") // reset all formatting
+			if currentColor != -1 {
+				// restore the current color
+				b.WriteString(fmt.Sprintf("\x1b[%dm", currentColor))
+			}
+		} else if hl[i] == hlNormal {
+			if currentColor != -1 {
+				currentColor = -1
+				b.WriteString("\x1b[39m")
+			}
+			b.WriteRune(r)
+		} else {
+			color := SyntaxToColor(hl[i])
+			if color != currentColor {
+				currentColor = color
+				b.WriteString(fmt.Sprintf("\x1b[%dm", color))
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString(ResetColorCode)
 }
 
 func (e *Editor) drawStatusBar(b *strings.Builder) {
@@ -460,60 +473,6 @@ func getCursorPosition() (row, col int, err error) {
 }
 
 var ErrPromptCanceled = fmt.Errorf("user canceled the input prompt")
-
-// Prompt shows the given prompt in the status bar and get user input
-// until to user presses the Enter key to confirm the input or until the user
-// presses the Escape key to cancel the input. Returns the user input and nil
-// if the user enters the input. Returns an empty string and ErrPromptCancel
-// if the user cancels the input.
-// It takes an optional callback function, which takes the query string and
-// the last key pressed.
-// Returns the full string when entered, whether it was canceled, and an error
-func (e *Editor) Prompt(prompt string, cb func(query string, k Key)) (string, bool, error) {
-	var text []rune
-	for {
-		e.SetStatusMessage(prompt, string(text))
-		e.Render()
-
-		k, err := readKey()
-		if err != nil {
-			return "", false, err
-		}
-
-		switch k {
-		case keyDelete, keyBackspace, Key(ctrl('h')):
-			log.Printf("text4: %v", text)
-			if len(text) != 0 {
-				text = text[:len(text)-1]
-			}
-		case keyEscape:
-			e.SetStatusMessage("")
-			if cb != nil {
-				cb(string(text), k)
-			}
-
-			return "", true, nil
-		case keyEnter:
-			if len(text) != 0 {
-				e.SetStatusMessage("")
-				if cb != nil {
-					cb(string(text), k)
-				}
-
-				return string(text), false, nil
-			}
-		default:
-
-			if isPrintable(k) {
-				text = append(text, rune(k))
-			}
-		}
-
-		if cb != nil {
-			cb(string(text), k)
-		}
-	}
-}
 
 func isPrintable(k Key) bool {
 	return !unicode.IsControl(rune(k)) && unicode.IsPrint(rune(k)) && !isArrowKey(k)

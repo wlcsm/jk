@@ -1,15 +1,12 @@
 package main
 
-import (
-	"strings"
-	"unicode/utf8"
-)
-
 type SDK interface {
 	InsertChar(c rune)
 	DeleteChar()
 	DeleteRow(at int)
 	Find() error
+
+	Prompt(prompt string, cb func(query string, k Key)) (string, bool, error)
 
 	// Delete until the rune
 	DeleteUntil(s rune)
@@ -114,6 +111,53 @@ func (e *Editor) DeleteRow(at int) {
 	e.WrapCursorX()
 }
 
+// Prompt shows the given prompt in the status bar and get user input
+// until to user presses the Enter key to confirm the input or until the user
+// presses the Escape key to cancel the input. Returns the user input and nil
+// if the user enters the input. Returns an empty string and ErrPromptCancel
+// if the user cancels the input.
+// It takes an optional callback function, which takes the query string and
+// the last key pressed.
+// Returns the full string when entered, whether it was canceled, and an error
+func (e *Editor) Prompt(prompt string, cb func(query []rune, k Key)) (string, bool, error) {
+	var text []rune
+	var cancelled bool
+loop:
+	for {
+		e.SetStatusMessage(prompt, string(text))
+		e.Render()
+
+		k, err := readKey()
+		if err != nil {
+			return "", false, err
+		}
+
+		switch k {
+		case keyDelete, keyBackspace, Key(ctrl('h')):
+			if len(text) != 0 {
+				text = text[:len(text)-1]
+			}
+		case keyEscape:
+			cancelled = true
+			break loop
+		case keyEnter:
+			break loop
+		default:
+
+			if isPrintable(k) {
+				text = append(text, rune(k))
+			}
+		}
+
+		if cb != nil {
+			cb(text, k)
+		}
+	}
+
+	e.SetStatusMessage("")
+	return string(text), cancelled, nil
+}
+
 /*** find ***/
 
 func (e *Editor) Find() error {
@@ -122,73 +166,42 @@ func (e *Editor) Find() error {
 	savedColOffset := e.colOffset
 	savedRowOffset := e.rowOffset
 
-	lastMatchRowIndex := -1 // remember the last match row
-	searchDirection := 1    // 1 = forward, -1 = backward
+//	var savedHl []SyntaxHL
 
-	savedHlRowIndex := -1
-	var savedHl []SyntaxHL
-
-	onKeyPress := func(query string, k Key) {
-		if len(savedHl) > 0 {
-			copy(e.rows[savedHlRowIndex].hl, savedHl)
-			savedHl = nil
-		}
-		switch k {
-		case keyEnter, Key('\x1b'):
-			lastMatchRowIndex = -1
-			searchDirection = 1
-			return
-		case keyArrowRight, keyArrowDown:
-			searchDirection = 1
-		case keyArrowLeft, keyArrowUp:
-			searchDirection = -1
-		default:
-			// unless an arrow key was pressed, we'll reset.
-			lastMatchRowIndex = -1
-			searchDirection = 1
-		}
-
-		if lastMatchRowIndex == -1 {
-			searchDirection = 1
-		}
-
-		current := lastMatchRowIndex
-
+	onKeyPress := func(query []rune, k Key) {
 		// search for query and set e.cy, e.cx, e.rowOffset values.
-		for i := 0; i < len(e.rows); i++ {
-			current += searchDirection
-			switch current {
-			case -1:
-				current = len(e.rows) - 1
-			case len(e.rows):
-				current = 0
+		for i, row := range e.rows[e.cy:] {
+
+			index := findSubstring(row.chars, query)
+			if index == -1 {
+				continue
 			}
 
-			row := e.rows[current]
-			rx := strings.Index(row.render, query)
-			if rx != -1 {
-				lastMatchRowIndex = current
-				e.cy = current
-				e.cx = rowRxToCx(row, rx)
-				// set rowOffset to bottom so that the next scroll() will scroll
-				// upwards and the matching line will be at the top of the screen
-				e.rowOffset = len(e.rows)
-				// highlight the matched string
-				savedHlRowIndex = current
-				savedHl = make([]SyntaxHL, len(row.hl))
-				copy(savedHl, row.hl)
-				for i := 0; i < utf8.RuneCountInString(query); i++ {
-					row.hl[rx+i] = hlMatch
-				}
-				break
-			}
+			// match found
+			e.cy = i
+			e.cx = index
+
+			// TODO feel like there is a better way to do this, should decouple this behaviour
+			// set rowOffset to bottom so that the next scroll() will scroll
+			// upwards and the matching line will be at the top of the screen
+			e.rowOffset = len(e.rows)
+//
+//			// highlight the matched string
+//			savedHl = make([]SyntaxHL, len(row.hl))
+//			copy(savedHl, row.hl)
+//			for i := range query {
+//				row.hl[rx+i] = hlMatch
+//			}
+
+			return
 		}
 	}
 
-	_, canceled, err := e.Prompt(
-		"Search: %s (ESC = cancel | Enter = confirm | Arrows = prev/next)",
-		onKeyPress,
-	)
+	_, canceled, err := e.Prompt("Search: %s", onKeyPress)
+
+	// Get rid of the search highlight
+	e.updateRow(e.rows[e.cy])
+
 	// restore cursor position when the user cancels search
 	if canceled {
 		e.cx = savedCx
@@ -196,7 +209,23 @@ func (e *Editor) Find() error {
 		e.colOffset = savedColOffset
 		e.rowOffset = savedRowOffset
 	}
+
 	return err
+}
+
+func findSubstring(text, query []rune) int {
+outer:
+	for i := range text {
+		for j, q := range query {
+			if text[i+j] != q {
+				continue outer
+			}
+		}
+
+		return i
+	}
+
+	return -1
 }
 
 func (e *Editor) SetRow(at int, chars string) {
