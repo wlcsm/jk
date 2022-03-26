@@ -7,8 +7,16 @@ type SDK interface {
 	DeleteChar()
 	DeleteRow(at int)
 	Find() error
+	ForwardWord()
+	BackWord()
+	InsertNewline()
+	IsModified() bool
 
-	Prompt(prompt string, cb func(query string, k Key)) (string, bool, error)
+	OpenFile(f string) error
+	Prompt(prompt string, cb func(k Key) (string, bool)) error
+	StaticPrompt(prompt string) (string, error)
+	Save() (int, error)
+	SetStatusMessage(format string, args ...interface{})
 
 	// Delete until the rune
 	DeleteUntil(s rune)
@@ -31,7 +39,7 @@ type SDK interface {
 	// Set the absolute position of the cursor's x (wrapped)
 	WrapCursorX()
 	// Wrap the cursor to keep it in bounds
-	WrapCursory()
+	WrapCursorY()
 
 	SetRelativePosY(y int)
 	SetRelativePosX(x int)
@@ -47,6 +55,10 @@ type SDK interface {
 	ScreenTop() int
 	ScreenLeft() int
 	ScreenRight() int
+}
+
+func (e *Editor) IsModified() bool {
+	return e.modified
 }
 
 func (e *Editor) CX() int {
@@ -143,7 +155,7 @@ func (e *Editor) DeleteRow(at int) {
 }
 
 // Prompt shows the given prompt in the status bar and get user input
-// 
+//
 // The mandatory callback is called with the user's input and returns the full
 // text to display and a boolean indicating whether the promt should finish
 func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) error {
@@ -183,7 +195,6 @@ func (e *Editor) Find() error {
 	)
 
 	onKeyPress := func(k Key) (string, bool) {
-
 		switch k {
 		case keyDelete, keyBackspace, Key(ctrl('h')):
 			if len(query) != 0 {
@@ -228,7 +239,6 @@ func (e *Editor) Find() error {
 		}
 
 		return string(query), false
-
 	}
 
 	err := e.Prompt("Search: %s", onKeyPress)
@@ -300,8 +310,8 @@ func (e *Editor) DeleteUntil(s rune) {
 	i, _ := e.FindRuneLeft(s)
 
 	row := e.rows[e.cy]
-	row.chars = append(row.chars[:i], row.chars[e.cx:]...)
-	e.cx = i
+	row.chars = append(row.chars[:i+1], row.chars[e.cx:]...)
+	e.cx = i + 1
 
 	e.updateRow(row)
 }
@@ -423,4 +433,52 @@ func Save(e *Editor) {
 
 func (e *Editor) SetMode(m EditorMode) {
 	e.Mode = m
+
+	if m == InsertMode {
+		for i, keymap := range Keymapping {
+			if keymap.Name == CommandModeName {
+				Keymapping[i] = InsertModeMap
+				return
+			}
+		}
+	} else {
+		for i, keymap := range Keymapping {
+			if keymap.Name == InsertModeName {
+				Keymapping[i] = CommandModeMap
+				return
+			}
+		}
+	}
+}
+
+// StaticPrompt is a "normal" prompt designed to only get input from the user.
+// It you want things to happen when you press any key, then use Prompt
+func (e *Editor) StaticPrompt(prompt string) (input string, err error) {
+	canceled := false
+	err = e.Prompt(prompt, func(k Key) (string, bool) {
+		switch k {
+		case keyEnter:
+			return "", true
+		case keyEscape:
+			canceled = true
+			return "", true
+		default:
+			if isPrintable(k) {
+				input += string(k)
+			}
+
+			return prompt + input, false
+		}
+	})
+	e.SetStatusMessage("")
+
+	if err != nil {
+		return "", err
+	}
+
+	if canceled {
+		return input, ErrPromptCanceled
+	}
+
+	return input, nil
 }

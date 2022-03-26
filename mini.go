@@ -36,6 +36,8 @@ const (
 type Editor struct {
 	Mode EditorMode
 
+	errChan chan error
+
 	// cursor coordinates
 	cx, cy int // cx is an index into Row.chars
 	rx     int // rx is an index into []rune(Row.render)
@@ -231,8 +233,15 @@ func (e *Editor) ProcessKey() error {
 		return err
 	}
 
-	if err := e.Keymapping(k); err != nil {
-		return err
+	for _, keymap := range Keymapping {
+		handled, err := keymap.Handler(e, k)
+		if err != nil {
+			return err
+		}
+
+		if handled {
+			break
+		}
 	}
 
 	return nil
@@ -328,11 +337,9 @@ func (e *Editor) drawRow(w io.Writer, y int) {
 }
 
 const (
-	ClearColor = 39
+	ClearColor    = 39
 	InvertedColor = 7
 )
-
-
 
 func setColor(b io.Writer, c int) {
 	b.Write([]byte("\x1b[" + strconv.Itoa(c) + "m"))
@@ -465,33 +472,33 @@ func isArrowKey(k Key) bool {
 
 func (e *Editor) Save() (int, error) {
 	return 0, nil
-//	// TODO: write to a new temp file, and then rename that file to the
-//	// actual file the user wants to overwrite, checking errors through
-//	// the whole process.
-//	if len(e.filename) == 0 {
-//		err := e.Prompt("Save as: %s (ESC to cancel)", nil)
-//		if err != nil {
-//			return 0, err
-//		}
-//		if cancelled {
-//			return 0, ErrPromptCanceled
-//		}
-//
-//		e.filename = fname
-//	}
-//
-//	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-//	if err != nil {
-//		return 0, err
-//	}
-//	defer f.Close()
-//	n, err := f.WriteString(e.rowsToString())
-//	if err != nil {
-//		return 0, err
-//	}
-//
-//	e.modified = false
-//	return n, nil
+	//	// TODO: write to a new temp file, and then rename that file to the
+	//	// actual file the user wants to overwrite, checking errors through
+	//	// the whole process.
+	//	if len(e.filename) == 0 {
+	//		err := e.Prompt("Save as: %s (ESC to cancel)", nil)
+	//		if err != nil {
+	//			return 0, err
+	//		}
+	//		if cancelled {
+	//			return 0, ErrPromptCanceled
+	//		}
+	//
+	//		e.filename = fname
+	//	}
+	//
+	//	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	//	if err != nil {
+	//		return 0, err
+	//	}
+	//	defer f.Close()
+	//	n, err := f.WriteString(e.rowsToString())
+	//	if err != nil {
+	//		return 0, err
+	//	}
+	//
+	//	e.modified = false
+	//	return n, nil
 }
 
 func (e *Editor) rowsToString() string {
@@ -536,11 +543,14 @@ func (e *Editor) detectSyntax() {
 func (e *Editor) OpenFile(filename string) error {
 	e.filename = filename
 	e.detectSyntax()
+
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	e.rows = make([]*Row, 0)
 
 	s := bufio.NewScanner(f)
 	for s.Scan() {
@@ -549,6 +559,7 @@ func (e *Editor) OpenFile(filename string) error {
 		bytes.TrimRightFunc(line, func(r rune) bool { return r == '\n' || r == '\r' })
 		e.InsertRow(len(e.rows), string(line))
 	}
+
 	if err := s.Err(); err != nil {
 		return err
 	}
@@ -667,7 +678,7 @@ func (e *Editor) updateHighlight(row *Row) {
 		if e.syntax.highlightStrings {
 			if strQuote != 0 {
 				row.hl[idx] = hlString
-				//deal with escape quote when inside a string
+				// deal with escape quote when inside a string
 				if r == '\\' && idx+1 < len(runes) {
 					row.hl[idx+1] = hlString
 					idx += 2
@@ -798,7 +809,7 @@ func main() {
 var LogFile = "mini.log"
 
 func enableLogs() (*os.File, error) {
-	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
 	if err != nil {
 		return nil, errors.Wrapf(err, "opening file. filename=%s", LogFile)
 	}

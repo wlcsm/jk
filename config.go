@@ -3,19 +3,83 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/mattn/go-runewidth"
+	"github.com/pkg/errors"
 )
 
 const Version = "dev"
 
-func (e *Editor) Keymapping(k Key) error {
-	switch k {
-	case keyEnter:
-		e.InsertNewline()
+type KeyMap struct {
+	Name    KeyMapName
+	Handler func(e SDK, k Key) (bool, error)
+}
 
-	case Key(ctrl('q')):
-		if e.modified {
+// Mappings at the beginning have higher priority
+var Keymapping = []KeyMap{
+	BasicMap,
+	CommandModeMap,
+}
+
+var KeyModes = map[KeyMapName]KeyMap{
+	BasicMapName:    BasicMap,
+	InsertModeName:  InsertModeMap,
+	CommandModeName: CommandModeMap,
+}
+
+type KeyMapName int
+
+const (
+	BasicMapName KeyMapName = iota + 1
+	InsertModeName
+	CommandModeName
+)
+
+var BasicMap = KeyMap{
+	Name:    BasicMapName,
+	Handler: basicHandler,
+}
+
+func basicHandler(e SDK, k Key) (bool, error) {
+	if f, ok := basicMapping[k]; ok {
+		return true, f(e)
+	}
+
+	return false, nil
+}
+
+var basicMapping = map[Key]func(e SDK) error{
+	keyBackspace: func(e SDK) error {
+		e.DeleteChar()
+		return nil
+	},
+	keyPageUp: func(e SDK) error {
+		e.SetPosY(e.ScreenTop())
+		return nil
+	},
+	keyPageDown: func(e SDK) error {
+		e.SetPosY(e.ScreenBottom())
+		return nil
+	},
+	keyArrowUp: func(e SDK) error {
+		e.SetRelativePosY(-1)
+		return nil
+	},
+	keyArrowDown: func(e SDK) error {
+		e.SetRelativePosY(1)
+		return nil
+	},
+	keyArrowLeft: func(e SDK) error {
+		e.SetRelativePosX(-1)
+		return nil
+	},
+	keyArrowRight: func(e SDK) error {
+		e.SetRelativePosX(1)
+		return nil
+	},
+	Key(ctrl('q')): func(e SDK) error {
+		if e.IsModified() {
 			var quit bool
 
 			e.Prompt("WARNING!!! File has unsaved changes. Press Ctrl-Q again to quit.",
@@ -35,84 +99,148 @@ func (e *Editor) Keymapping(k Key) error {
 		ClearScreen()
 		RepositionCursor()
 		return ErrQuitEditor
-
-	case Key(ctrl('s')):
+	},
+	Key(ctrl('s')): func(e SDK) error {
 		e.Save()
-	case Key(ctrl('f')):
+		return nil
+	},
+	Key(ctrl('f')): func(e SDK) error {
 		err := e.Find()
-		if err != nil {
-			if err == ErrPromptCanceled {
-				e.SetStatusMessage("")
-			} else {
-				return err
-			}
+		if err == ErrPromptCanceled {
+			e.SetStatusMessage("")
 		}
-	case keyBackspace:
-		e.DeleteChar()
-	case keyPageUp:
-		e.SetPosY(e.ScreenTop())
-	case keyPageDown:
-		e.SetPosY(e.ScreenBottom())
-	case keyArrowUp:
-		e.SetRelativePosY(-1)
-	case keyArrowDown:
-		e.SetRelativePosY(1)
-	case keyArrowLeft:
-		e.SetRelativePosX(-1)
-	case keyArrowRight:
-		e.SetRelativePosX(1)
-	case Key(ctrl('c')):
-		e.SetMode(CommandMode)
-	case Key(ctrl('W')):
-		e.DeleteUntil(rune(' '))
-	default:
-		if e.Mode == CommandMode {
-			e.CommandModeMapping(k)
-		} else {
-			e.InsertChar(rune(k))
-		}
-	}
 
-	return nil
+		if err != nil {
+			return err
+		}
+		return nil
+	},
+	Key(ctrl('W')): func(e SDK) error {
+		e.DeleteUntil(rune(' '))
+		return nil
+	},
 }
 
-func (e *Editor) CommandModeMapping(k Key) error {
+var InsertModeMap = KeyMap{
+	Name:    InsertModeName,
+	Handler: insertModeHandler,
+}
 
-	switch k {
-	case Key('j'):
+func insertModeHandler(e SDK, k Key) (bool, error) {
+	if f, ok := insertModeMapping[k]; ok {
+		err := f(e)
+		return true, err
+	}
+
+	e.InsertChar(rune(k))
+
+	return true, nil
+}
+
+var insertModeMapping = map[Key]func(e SDK) error{
+	keyEnter: func(e SDK) error {
+		e.InsertNewline()
+		return nil
+	},
+	Key(ctrl('c')): func(e SDK) error {
+		e.SetMode(CommandMode)
+		return nil
+	},
+}
+
+var CommandModeMap = KeyMap{
+	Name:    CommandModeName,
+	Handler: commandModeHandler,
+}
+
+func commandModeHandler(e SDK, k Key) (bool, error) {
+	if f, ok := commandModeMapping[k]; ok {
+		err := f(e)
+		return true, err
+	}
+
+	return false, nil
+}
+
+var commandModeMapping = map[Key]func(e SDK) error{
+	// Open a new file
+	Key(ctrl('e')): func(e SDK) error {
+		filename, err := e.StaticPrompt("File name: ")
+		if errors.Is(err, ErrPromptCanceled) {
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if len(filename) == 0 {
+			return fmt.Errorf("No file name")
+		}
+
+		if err = e.OpenFile(filename); errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("File doesn't exist")
+		}
+
+		return err
+	},
+	Key('j'): func(e SDK) error {
 		e.SetRelativePosY(1)
-	case Key('k'):
+		return nil
+	},
+	Key('k'): func(e SDK) error {
 		e.SetRelativePosY(-1)
-	case Key('h'):
+		return nil
+	},
+	Key('h'): func(e SDK) error {
 		e.SetRelativePosX(-1)
-	case Key('l'):
+		return nil
+	},
+	Key('l'): func(e SDK) error {
 		e.SetRelativePosX(1)
-	case Key('i'):
+		return nil
+	},
+	Key('i'): func(e SDK) error {
 		e.SetMode(InsertMode)
-	case Key('o'):
+		return nil
+	},
+	Key('o'): func(e SDK) error {
 		e.InsertRow(e.CY()+1, "")
 		e.SetRelativePosY(1)
 		e.SetMode(InsertMode)
-	case Key('0'):
+		return nil
+	},
+	Key('0'): func(e SDK) error {
 		e.SetPosX(0)
-	case Key('$'):
+		return nil
+	},
+	Key('$'): func(e SDK) error {
 		e.SetPosMaxX()
-	case Key('G'):
+		return nil
+	},
+	Key('G'): func(e SDK) error {
 		e.SetPosMaxY()
-	case Key('D'):
+		return nil
+	},
+	Key('D'): func(e SDK) error {
 		e.DeleteRow(e.CY())
-	case Key('C'):
-		e.SetRow(e.cy, "")
-	case Key('w'):
-		e.forwardWord()
-	case Key('b'):
-		e.backWord()
-	}
-
-	return nil
+		return nil
+	},
+	Key('C'): func(e SDK) error {
+		e.SetRow(e.CY(), "")
+		return nil
+	},
+	Key('w'): func(e SDK) error {
+		e.ForwardWord()
+		return nil
+	},
+	Key('b'): func(e SDK) error {
+		e.BackWord()
+		return nil
+	},
 }
 
-func (e *Editor) forwardWord() {
+func (e *Editor) ForwardWord() {
 	i, ok := e.FindRight(func(r rune) bool {
 		return r == ' ' || r == '\t'
 	})
@@ -130,7 +258,7 @@ func (e *Editor) forwardWord() {
 	e.SetPosX(i)
 }
 
-func (e *Editor) backWord() {
+func (e *Editor) BackWord() {
 	i, ok := e.FindLeft(func(r rune) bool {
 		return r == ' ' || r == '\t'
 	})
