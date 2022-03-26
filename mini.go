@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -39,7 +40,7 @@ type Editor struct {
 	cx, cy int // cx is an index into Row.chars
 	rx     int // rx is an index into []rune(Row.render)
 
-	// offsets
+	// offsets. Offset is calculated in the number of runes
 	rowOffset int
 	colOffset int
 
@@ -50,11 +51,8 @@ type Editor struct {
 	// file content
 	rows []*Row
 
-	// dirty counts the number of edits since the last save to disk.
-	dirty int
-
-	// the number of times the user has pressed Ctrl-Q with unsaved changes
-	quitCounter int
+	// whether or not the file has been modified
+	modified bool
 
 	filename string
 
@@ -62,11 +60,21 @@ type Editor struct {
 	statusmsg     string
 	statusmsgTime time.Time
 
+	cfg DisplayConfig
+
 	// specify which syntax highlight to use.
 	syntax *EditorSyntax
 
 	// original termios: used to restore the state on exit.
 	origTermios *unix.Termios
+}
+
+type DisplayConfig struct {
+	Tabstop int
+}
+
+var defaultDisplayConfig = DisplayConfig{
+	Tabstop: 8,
 }
 
 func (e *Editor) Init() error {
@@ -98,6 +106,7 @@ func (e *Editor) Init() error {
 	e.screenRows = int(ws.Row) - 2 // make room for status-bar and message-bar
 	e.screenCols = int(ws.Col)
 
+	e.cfg = defaultDisplayConfig
 	e.Mode = CommandMode
 	return nil
 }
@@ -226,46 +235,44 @@ func (e *Editor) ProcessKey() error {
 		return err
 	}
 
-	// Reset quitCounter to zero if user pressed any key other than Ctrl-Q.
-	e.quitCounter = 0
 	return nil
 }
 
-func (e *Editor) displayWelcomeMessage(b *strings.Builder) {
+func (e *Editor) displayWelcomeMessage(w io.Writer) {
 	welcomeMsg := fmt.Sprintf("Mini editor -- version %s", Version)
 	if runewidth.StringWidth(welcomeMsg) > e.screenCols {
 		welcomeMsg = utf8Slice(welcomeMsg, 0, e.screenCols)
 	}
 	padding := (e.screenCols - runewidth.StringWidth(welcomeMsg)) / 2
 	if padding > 0 {
-		b.Write([]byte("~"))
+		w.Write([]byte("~"))
 		padding--
 	}
 	for ; padding > 0; padding-- {
-		b.Write([]byte(" "))
+		w.Write([]byte(" "))
 	}
 
-	b.WriteString(welcomeMsg)
+	w.Write([]byte(welcomeMsg))
 }
 
-func (e *Editor) drawRows(b *strings.Builder) {
+func (e *Editor) drawRows(w io.Writer) {
 	for y := 0; y < e.screenRows; y++ {
-		e.drawRow(b, y)
+		e.drawRow(w, y)
 
-		b.Write([]byte(ClearLineCode))
-		b.Write([]byte("\r\n"))
+		w.Write([]byte(ClearLineCode))
+		w.Write([]byte("\r\n"))
 	}
 }
 
-func (e *Editor) drawRow(b *strings.Builder, y int) {
+func (e *Editor) drawRow(w io.Writer, y int) {
 	filerow := y + e.rowOffset
 	if filerow >= len(e.rows) {
 		// The display message should not be here, you should not be
 		// able to get back to it once passed
 		if len(e.rows) == 0 && y == e.screenRows/3 {
-			e.displayWelcomeMessage(b)
+			e.displayWelcomeMessage(w)
 		} else {
-			b.Write([]byte("~"))
+			w.Write([]byte("~"))
 		}
 
 		return
@@ -275,13 +282,15 @@ func (e *Editor) drawRow(b *strings.Builder, y int) {
 		line string
 		hl   []SyntaxHL
 	)
-	if runewidth.StringWidth(e.rows[filerow].render) > e.colOffset {
-		line = utf8Slice(
-			e.rows[filerow].render,
-			e.colOffset,
-			utf8.RuneCountInString(e.rows[filerow].render))
+
+	// Use the offset to remove the first part of the render string
+	row := e.rows[filerow]
+	if runewidth.StringWidth(row.render) > e.colOffset {
+		line = utf8Slice(row.render, e.colOffset, utf8.RuneCountInString(row.render))
 		hl = e.rows[filerow].hl[e.colOffset:]
 	}
+
+	// Use the number of columns to truncate the end
 	if runewidth.StringWidth(line) > e.screenCols {
 		line = runewidth.Truncate(line, e.screenCols, "")
 		hl = hl[:utf8.RuneCountInString(line)]
@@ -295,72 +304,42 @@ func (e *Editor) drawRow(b *strings.Builder, y int) {
 			if r < 26 {
 				sym = '@' + r
 			}
-			b.WriteString("\x1b[7m") // use inverted colors
-			b.WriteRune(sym)
-			b.WriteString("\x1b[m") // reset all formatting
+
+			setColor(w, InvertedColor)
+			w.Write(rToB(sym))
+			clearFormatting(w)
+
+			// restore the current color
 			if currentColor != -1 {
-				// restore the current color
-				b.WriteString(fmt.Sprintf("\x1b[%dm", currentColor))
+				setColor(w, currentColor)
 			}
-		} else if hl[i] == hlNormal {
-			if currentColor != -1 {
-				currentColor = -1
-				b.WriteString("\x1b[39m")
-			}
-			b.WriteRune(r)
 		} else {
 			color := SyntaxToColor(hl[i])
 			if color != currentColor {
 				currentColor = color
-				b.WriteString(fmt.Sprintf("\x1b[%dm", color))
+				setColor(w, color)
 			}
-			b.WriteRune(r)
+
+			w.Write(rToB(r))
 		}
 	}
-	b.WriteString(ResetColorCode)
+
+	setColor(w, ClearColor)
 }
 
-func (e *Editor) drawStatusBar(b *strings.Builder) {
-	b.Write([]byte("\x1b[7m"))      // switch to inverted colors
-	defer b.Write([]byte("\x1b[m")) // switch back to normal formatting
-	filename := e.filename
-	if utf8.RuneCountInString(filename) == 0 {
-		filename = "[No Name]"
-	}
-	dirtyStatus := ""
-	if e.dirty > 0 {
-		dirtyStatus = "(modified)"
-	}
+const (
+	ClearColor = 39
+	InvertedColor = 7
+)
 
-	mode := ""
-	switch e.Mode {
-	case InsertMode:
-		mode = "-- INSERT MODE --"
-	case CommandMode:
-		mode = "-- COMMAND MODE --"
-	}
 
-	lmsg := fmt.Sprintf("%.20s - %d lines %s %s", filename, len(e.rows), dirtyStatus, mode)
-	if runewidth.StringWidth(lmsg) > e.screenCols {
-		lmsg = runewidth.Truncate(lmsg, e.screenCols, "...")
-	}
-	b.WriteString(lmsg)
-	filetype := "no filetype"
-	if e.syntax != nil {
-		filetype = e.syntax.filetype
-	}
-	rmsg := fmt.Sprintf("%s | %d/%d", filetype, e.cy+1, len(e.rows))
-	l := runewidth.StringWidth(lmsg)
-	for l < e.screenCols {
-		if e.screenCols-l == runewidth.StringWidth(rmsg) {
-			b.WriteString(rmsg)
-			break
-		}
-		b.Write([]byte(" "))
-		l++
-	}
 
-	b.Write([]byte("\r\n"))
+func setColor(b io.Writer, c int) {
+	b.Write([]byte("\x1b[" + strconv.Itoa(c) + "m"))
+}
+
+func clearFormatting(b io.Writer) {
+	b.Write([]byte("\x1b[m"))
 }
 
 // utf8Slice slice the given string by utf8 character.
@@ -380,11 +359,12 @@ func (e *Editor) drawMessageBar(b *strings.Builder) {
 	}
 }
 
-func rowCxToRx(row *Row, cx int) int {
+// Cursor position (which is calculated in runes) to the visual position
+func (e *Editor) rowCxToRx(row *Row, cx int) int {
 	rx := 0
 	for _, r := range row.chars[:cx] {
 		if r == '\t' {
-			rx += (Tabstop) - (rx % Tabstop)
+			rx += (e.cfg.Tabstop) - (rx % e.cfg.Tabstop)
 		} else {
 			rx += runewidth.RuneWidth(r)
 		}
@@ -392,7 +372,7 @@ func rowCxToRx(row *Row, cx int) int {
 	return rx
 }
 
-func rowRxToCx(row *Row, rx int) int {
+func (e *Editor) rowRxToCx(row *Row, rx int) int {
 	if len(row.chars) == 0 {
 		return 0
 	}
@@ -400,7 +380,7 @@ func rowRxToCx(row *Row, rx int) int {
 	curRx := 0
 	for i, r := range row.chars {
 		if r == '\t' {
-			curRx += (Tabstop) - (curRx % Tabstop)
+			curRx += (e.cfg.Tabstop) - (curRx % e.cfg.Tabstop)
 		} else {
 			curRx += runewidth.RuneWidth(r)
 		}
@@ -415,7 +395,7 @@ func rowRxToCx(row *Row, rx int) int {
 func (e *Editor) scroll() {
 	e.rx = 0
 	if e.cy < len(e.rows) {
-		e.rx = rowCxToRx(e.rows[e.cy], e.cx)
+		e.rx = e.rowCxToRx(e.rows[e.cy], e.cx)
 	}
 	// scroll up if the cursor is above the visible window.
 	if e.cy < e.rowOffset {
@@ -452,6 +432,7 @@ func (e *Editor) Render() {
 
 	// position the cursor
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", (e.cy-e.rowOffset)+1, (e.rx-e.colOffset)+1))
+
 	// show the cursor
 	b.Write([]byte("\x1b[?25h"))
 	os.Stdout.WriteString(b.String())
@@ -483,34 +464,36 @@ func isArrowKey(k Key) bool {
 }
 
 func (e *Editor) Save() (int, error) {
-	// TODO: write to a new temp file, and then rename that file to the
-	// actual file the user wants to overwrite, checking errors through
-	// the whole process.
-	if len(e.filename) == 0 {
-		fname, cancelled, err := e.Prompt("Save as: %s (ESC to cancel)", nil)
-		if err != nil {
-			return 0, err
-		}
-		if cancelled {
-			return 0, ErrPromptCanceled
-		}
-
-		e.filename = fname
-		e.selectSyntaxHighlight()
-	}
-
-	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	n, err := f.WriteString(e.rowsToString())
-	if err != nil {
-		return 0, err
-	}
-	e.dirty = 0
-	return n, nil
+	return 0, nil
+//	// TODO: write to a new temp file, and then rename that file to the
+//	// actual file the user wants to overwrite, checking errors through
+//	// the whole process.
+//	if len(e.filename) == 0 {
+//		err := e.Prompt("Save as: %s (ESC to cancel)", nil)
+//		if err != nil {
+//			return 0, err
+//		}
+//		if cancelled {
+//			return 0, ErrPromptCanceled
+//		}
+//
+//		e.filename = fname
+//	}
+//
+//	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+//	if err != nil {
+//		return 0, err
+//	}
+//	defer f.Close()
+//	n, err := f.WriteString(e.rowsToString())
+//	if err != nil {
+//		return 0, err
+//	}
+//
+//	e.modified = false
+//	return n, nil
 }
+
 func (e *Editor) rowsToString() string {
 	var b strings.Builder
 	for _, row := range e.rows {
@@ -520,16 +503,45 @@ func (e *Editor) rowsToString() string {
 	return b.String()
 }
 
+// Fairly basic version. Probably can make it faster *if need be*
+func rToB(r rune) []byte {
+	return []byte(string(r))
+}
+
+func (e *Editor) detectSyntax() {
+	e.syntax = nil
+	if len(e.filename) == 0 {
+		return
+	}
+
+	ext := filepath.Ext(e.filename)
+
+	for _, syntax := range HLDB {
+		for _, pattern := range syntax.filematch {
+			isExt := strings.HasPrefix(pattern, ".")
+			if (isExt && pattern == ext) ||
+				(!isExt && strings.Index(e.filename, pattern) != -1) {
+				e.syntax = syntax
+				for _, row := range e.rows {
+					e.updateHighlight(row)
+				}
+				return
+			}
+		}
+	}
+}
+
 // OpenFile opens a file with the given filename.
 // If a file does not exist, it returns os.ErrNotExist.
 func (e *Editor) OpenFile(filename string) error {
 	e.filename = filename
-	e.selectSyntaxHighlight()
+	e.detectSyntax()
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		line := s.Bytes()
@@ -540,7 +552,8 @@ func (e *Editor) OpenFile(filename string) error {
 	if err := s.Err(); err != nil {
 		return err
 	}
-	e.dirty = 0
+
+	e.modified = false
 	return nil
 }
 
@@ -573,7 +586,7 @@ func (e *Editor) updateRow(row *Row) {
 		b.WriteRune(' ')
 		col++
 		// append spaces until we get to a tab stop
-		for col%Tabstop != 0 {
+		for col%e.cfg.Tabstop != 0 {
 			b.WriteRune(' ')
 			col++
 		}
@@ -587,6 +600,7 @@ func isSeparator(r rune) bool {
 }
 
 func (e *Editor) updateHighlight(row *Row) {
+	// TODO why can't we just use len(row.chars)? for some reason this panics
 	row.hl = make([]SyntaxHL, utf8.RuneCountInString(row.render))
 	for i := range row.hl {
 		row.hl[i] = hlNormal
@@ -596,10 +610,10 @@ func (e *Editor) updateHighlight(row *Row) {
 		return
 	}
 
+	// whether the previous rune was a separator
 	prevSep := true
 
-	// set to the quote when inside of a string.
-	// set to zero when outside of a string.
+	// zero when outside a string, set to the quote character ( ' or ")  in the string
 	var strQuote rune
 
 	// indicates whether we are inside a multi-line comment.
@@ -614,6 +628,7 @@ func (e *Editor) updateHighlight(row *Row) {
 			prevHl = row.hl[idx-1]
 		}
 
+		// Single line comments
 		if e.syntax.scs != "" && strQuote == 0 && !inComment {
 			if strings.HasPrefix(string(runes[idx:]), e.syntax.scs) {
 				for idx < len(runes) {
@@ -624,6 +639,7 @@ func (e *Editor) updateHighlight(row *Row) {
 			}
 		}
 
+		// Multiline comments
 		if e.syntax.mcs != "" && e.syntax.mce != "" && strQuote == 0 {
 			if inComment {
 				row.hl[idx] = hlMlComment
@@ -634,11 +650,10 @@ func (e *Editor) updateHighlight(row *Row) {
 					}
 					inComment = false
 					prevSep = true
-					continue
 				} else {
 					idx++
-					continue
 				}
+				continue
 			} else if strings.HasPrefix(string(runes[idx:]), e.syntax.mcs) {
 				for j := 0; j < len(e.syntax.mcs); j++ {
 					row.hl[idx] = hlMlComment
@@ -649,7 +664,7 @@ func (e *Editor) updateHighlight(row *Row) {
 			}
 		}
 
-		if (e.syntax.flags & HL_HIGHLIGHT_STRINGS) != 0 {
+		if e.syntax.highlightStrings {
 			if strQuote != 0 {
 				row.hl[idx] = hlString
 				//deal with escape quote when inside a string
@@ -658,9 +673,11 @@ func (e *Editor) updateHighlight(row *Row) {
 					idx += 2
 					continue
 				}
+
 				if r == strQuote {
 					strQuote = 0
 				}
+
 				idx++
 				prevSep = true
 				continue
@@ -674,7 +691,7 @@ func (e *Editor) updateHighlight(row *Row) {
 			}
 		}
 
-		if (e.syntax.flags & HL_HIGHLIGHT_NUMBERS) != 0 {
+		if e.syntax.highlightNumbers {
 			if unicode.IsDigit(r) && (prevSep || prevHl == hlNumber) ||
 				r == '.' && prevHl == hlNumber {
 				row.hl[idx] = hlNumber
@@ -684,32 +701,11 @@ func (e *Editor) updateHighlight(row *Row) {
 			}
 		}
 
-		if prevSep {
-			keywordFound := false
-			for _, kw := range e.syntax.keywords {
-				isKeyword2 := strings.HasSuffix(kw, "|")
-				if isKeyword2 {
-					kw = strings.TrimSuffix(kw, "|")
-				}
-
-				end := idx + utf8.RuneCountInString(kw)
-				if end <= len(runes) && kw == string(runes[idx:end]) &&
-					(end == len(runes) || isSeparator(runes[end])) {
-					keywordFound = true
-					hl := hlKeyword1
-					if isKeyword2 {
-						hl = hlKeyword2
-					}
-					for idx < end {
-						row.hl[idx] = hl
-						idx++
-					}
-					break
-				}
-			}
-			if keywordFound {
-				prevSep = false
-				continue
+		if kw, hl := e.checkIfKeyword(runes[idx:]); kw != "" {
+			end := idx + len(kw)
+			for idx < end {
+				row.hl[idx] = hl
+				idx++
 			}
 		}
 
@@ -724,30 +720,54 @@ func (e *Editor) updateHighlight(row *Row) {
 	}
 }
 
-func (e *Editor) selectSyntaxHighlight() {
-	e.syntax = nil
-	if len(e.filename) == 0 {
-		return
+func (e *Editor) checkIfKeyword(text []rune) (string, SyntaxHL) {
+	kw := checkKeywordMatch(e.syntax.keywords, text)
+	if len(kw) != 0 {
+		return kw, hlKeyword1
 	}
 
-	ext := filepath.Ext(e.filename)
+	kw = checkKeywordMatch(e.syntax.keywords2, text)
+	if len(kw) != 0 {
+		return kw, hlKeyword2
+	}
 
-	for _, syntax := range HLDB {
-		for _, pattern := range syntax.filematch {
-			isExt := strings.HasPrefix(pattern, ".")
-			if (isExt && pattern == ext) ||
-				(!isExt && strings.Index(e.filename, pattern) != -1) {
-				e.syntax = syntax
-				for _, row := range e.rows {
-					e.updateHighlight(row)
-				}
-				return
-			}
+	return "", 0
+}
+
+// Check if any of the keywords are a prefix of text, and also that it isn't
+// just a substring of the a bigger word in text
+func checkKeywordMatch(keywords []string, text []rune) string {
+	for _, kw := range keywords {
+		length := utf8.RuneCountInString(kw)
+		if length > len(text) {
+			continue
 		}
+
+		// check if we have a match
+		if kw != string(text[:length]) {
+			continue
+		}
+
+		// check that this is the entire word, either
+		// there are no characters after this, or the
+		// next character is a separator
+		if length != len(text) && !isSeparator(text[length]) {
+			continue
+		}
+
+		return kw
 	}
+
+	return ""
 }
 
 func main() {
+	f, err := enableLogs()
+	if err != nil {
+		die(err)
+	}
+	defer f.Close()
+
 	var editor Editor
 
 	if err := editor.Init(); err != nil {
@@ -761,12 +781,6 @@ func main() {
 			die(err)
 		}
 	}
-
-	f, err := enableLogs()
-	if err != nil {
-		die(err)
-	}
-	defer f.Close()
 
 	editor.SetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find")
 

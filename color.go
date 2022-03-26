@@ -22,6 +22,7 @@ var defaultColorscheme = map[SyntaxHL]int{
 	hlString:    36,
 	hlNumber:    33,
 	hlMatch:     32,
+	hlNormal:    39,
 }
 
 func SyntaxToColor(hl SyntaxHL) int {

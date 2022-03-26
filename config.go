@@ -1,12 +1,13 @@
 package main
 
+import (
+	"fmt"
+	"io"
+
+	"github.com/mattn/go-runewidth"
+)
+
 const Version = "dev"
-
-const Tabstop = 8
-
-// The number of times the user needs to press Ctrl-Q to quit
-// the editor with unsaved changes.
-const QuitTimes = 0
 
 func (e *Editor) Keymapping(k Key) error {
 	switch k {
@@ -14,14 +15,21 @@ func (e *Editor) Keymapping(k Key) error {
 		e.InsertNewline()
 
 	case Key(ctrl('q')):
-		// warn the user about unsaved changes.
-		if e.dirty > 0 && e.quitCounter < QuitTimes {
-			e.SetStatusMessage(
-				"WARNING!!! File has unsaved changes. Press Ctrl-Q %d more times to quit.",
-				QuitTimes-e.quitCounter,
-			)
-			e.quitCounter++
-			return nil
+		if e.modified {
+			var quit bool
+
+			e.Prompt("WARNING!!! File has unsaved changes. Press Ctrl-Q again to quit.",
+				func(k Key) (string, bool) {
+					if k == Key(ctrl('q')) {
+						quit = true
+					}
+
+					return "", true
+				})
+
+			if !quit {
+				return nil
+			}
 		}
 
 		ClearScreen()
@@ -39,27 +47,12 @@ func (e *Editor) Keymapping(k Key) error {
 				return err
 			}
 		}
-
 	case keyBackspace:
 		e.DeleteChar()
-
 	case keyPageUp:
-		// position cursor at the top first.
-		e.cy = e.rowOffset
-		// then scroll up an entire screen worth.
-		for i := 0; i < e.screenRows; i++ {
-			e.SetRelativePosY(-1)
-		}
+		e.SetPosY(e.ScreenTop())
 	case keyPageDown:
-		// position cursor at the bottom first.
-		e.cy = e.rowOffset + e.screenRows - 1
-		if e.cy > len(e.rows) {
-			e.cy = len(e.rows)
-		}
-		// then scroll down an entire screen worth.
-		for i := 0; i < e.screenRows; i++ {
-			e.SetRelativePosY(1)
-		}
+		e.SetPosY(e.ScreenBottom())
 	case keyArrowUp:
 		e.SetRelativePosY(-1)
 	case keyArrowDown:
@@ -68,13 +61,8 @@ func (e *Editor) Keymapping(k Key) error {
 		e.SetRelativePosX(-1)
 	case keyArrowRight:
 		e.SetRelativePosX(1)
-
-	case Key(ctrl('l')), Key('\x1b'):
-		break // no op
-
 	case Key(ctrl('c')):
 		e.SetMode(CommandMode)
-
 	case Key(ctrl('W')):
 		e.DeleteUntil(rune(' '))
 	default:
@@ -85,18 +73,7 @@ func (e *Editor) Keymapping(k Key) error {
 		}
 	}
 
-	// Reset quitCounter to zero if user pressed any key other than Ctrl-Q.
-	e.quitCounter = 0
-
 	return nil
-}
-
-func (e *Editor) CX() int {
-	return e.cx
-}
-
-func (e *Editor) CY() int {
-	return e.cy
 }
 
 func (e *Editor) CommandModeMapping(k Key) error {
@@ -114,7 +91,7 @@ func (e *Editor) CommandModeMapping(k Key) error {
 		e.SetMode(InsertMode)
 	case Key('o'):
 		e.InsertRow(e.CY()+1, "")
-		e.SetRelativePosX(1)
+		e.SetRelativePosY(1)
 		e.SetMode(InsertMode)
 	case Key('0'):
 		e.SetPosX(0)
@@ -127,47 +104,100 @@ func (e *Editor) CommandModeMapping(k Key) error {
 	case Key('C'):
 		e.SetRow(e.cy, "")
 	case Key('w'):
-		i, ok := e.FindRight(func(r rune) bool {
-			return r == ' ' || r == '\t'
-		})
-		if !ok {
-			e.SetPosX(len(e.rows[e.cy].chars))
-			break
-		}
-
-		e.SetPosX(i)
-
-		i, _ = e.FindRight(func(r rune) bool {
-			return r != ' ' && r != '\t'
-		})
-
-		e.SetPosX(i)
+		e.forwardWord()
 	case Key('b'):
-		i, ok := e.FindLeft(func(r rune) bool {
-			return r == ' ' || r == '\t'
-		})
-		if !ok {
-			e.SetPosX(0)
-			break
-		}
-
-		// If the cursor is already at the beginning of the word, go to
-		// the beginning of the next word
-		if i == e.cx-1 {
-			i, _ = e.FindLeft(func(r rune) bool {
-				return r != ' ' && r != '\t'
-			})
-			e.SetPosX(i)
-
-			i, _ = e.FindLeft(func(r rune) bool {
-				return r == ' ' || r == '\t'
-			})
-
-			e.SetPosX(i)
-		}
-
-		e.SetPosX(i + 1)
+		e.backWord()
 	}
 
 	return nil
+}
+
+func (e *Editor) forwardWord() {
+	i, ok := e.FindRight(func(r rune) bool {
+		return r == ' ' || r == '\t'
+	})
+	if !ok {
+		e.SetPosX(len(e.rows[e.cy].chars))
+		return
+	}
+
+	e.SetPosX(i)
+
+	i, _ = e.FindRight(func(r rune) bool {
+		return r != ' ' && r != '\t'
+	})
+
+	e.SetPosX(i)
+}
+
+func (e *Editor) backWord() {
+	i, ok := e.FindLeft(func(r rune) bool {
+		return r == ' ' || r == '\t'
+	})
+	if !ok {
+		e.SetPosX(0)
+		return
+	}
+
+	// If the cursor is already at the beginning of the word, go to
+	// the beginning of the next word
+	if i == e.cx-1 {
+		i, _ = e.FindLeft(func(r rune) bool {
+			return r != ' ' && r != '\t'
+		})
+		e.SetPosX(i)
+
+		i, _ = e.FindLeft(func(r rune) bool {
+			return r == ' ' || r == '\t'
+		})
+
+		e.SetPosX(i)
+	}
+
+	e.SetPosX(i + 1)
+}
+
+func (e *Editor) drawStatusBar(b io.Writer) {
+	setColor(b, InvertedColor)
+	defer clearFormatting(b)
+
+	filename := e.filename
+	if len(filename) == 0 {
+		filename = "[No Name]"
+	}
+
+	dirtyStatus := ""
+	if e.modified {
+		dirtyStatus = "(modified)"
+	}
+
+	mode := ""
+	switch e.Mode {
+	case InsertMode:
+		mode = "-- INSERT MODE --"
+	case CommandMode:
+		mode = "-- COMMAND MODE --"
+	}
+
+	lmsg := fmt.Sprintf("%.20s - %d lines %s %s", filename, len(e.rows), dirtyStatus, mode)
+	if runewidth.StringWidth(lmsg) > e.screenCols {
+		lmsg = runewidth.Truncate(lmsg, e.screenCols, "...")
+	}
+	b.Write([]byte(lmsg))
+
+	filetype := "no filetype"
+	if e.syntax != nil {
+		filetype = e.syntax.filetype
+	}
+	rmsg := fmt.Sprintf("%s | %d/%d", filetype, e.cy+1, len(e.rows))
+
+	// Add padding between the left and right message
+	l := runewidth.StringWidth(lmsg)
+	r := runewidth.StringWidth(rmsg)
+	for i := 0; i < e.screenCols-l-r; i++ {
+		b.Write([]byte{' '})
+	}
+
+	b.Write([]byte(rmsg))
+	b.Write([]byte("\r\n"))
 }

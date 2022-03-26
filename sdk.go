@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 type SDK interface {
 	InsertChar(c rune)
 	DeleteChar()
@@ -40,6 +42,35 @@ type SDK interface {
 
 	CX() int
 	CY() int
+
+	ScreenBottom() int
+	ScreenTop() int
+	ScreenLeft() int
+	ScreenRight() int
+}
+
+func (e *Editor) CX() int {
+	return e.cx
+}
+
+func (e *Editor) CY() int {
+	return e.cy
+}
+
+func (e *Editor) ScreenBottom() int {
+	return e.rowOffset + e.screenRows - 1
+}
+
+func (e *Editor) ScreenTop() int {
+	return e.rowOffset + 1
+}
+
+func (e *Editor) ScreenLeft() int {
+	return e.colOffset + 1
+}
+
+func (e *Editor) ScreenRight() int {
+	return e.colOffset + e.screenCols + 1
 }
 
 func (row *Row) insertChar(at int, c rune) {
@@ -70,7 +101,7 @@ func (e *Editor) InsertChar(c rune) {
 	row.insertChar(e.cx, c)
 	e.updateRow(row)
 	e.cx++
-	e.dirty++
+	e.modified = true
 }
 
 func (e *Editor) DeleteChar() {
@@ -85,7 +116,7 @@ func (e *Editor) DeleteChar() {
 		row.deleteChar(e.cx - 1)
 		e.updateRow(row)
 		e.cx--
-		e.dirty++
+		e.modified = true
 	} else {
 		prevRow := e.rows[e.cy-1]
 		e.cx = len(prevRow.chars)
@@ -106,56 +137,36 @@ func (e *Editor) DeleteRow(at int) {
 		e.rows[i].idx--
 	}
 
-	e.dirty++
+	e.modified = true
 	e.WrapCursorY()
 	e.WrapCursorX()
 }
 
 // Prompt shows the given prompt in the status bar and get user input
-// until to user presses the Enter key to confirm the input or until the user
-// presses the Escape key to cancel the input. Returns the user input and nil
-// if the user enters the input. Returns an empty string and ErrPromptCancel
-// if the user cancels the input.
-// It takes an optional callback function, which takes the query string and
-// the last key pressed.
-// Returns the full string when entered, whether it was canceled, and an error
-func (e *Editor) Prompt(prompt string, cb func(query []rune, k Key)) (string, bool, error) {
-	var text []rune
-	var cancelled bool
-loop:
-	for {
-		e.SetStatusMessage(prompt, string(text))
+// 
+// The mandatory callback is called with the user's input and returns the full
+// text to display and a boolean indicating whether the promt should finish
+func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) error {
+	if cb == nil {
+		return fmt.Errorf("Can't give a nil function to Prompt")
+	}
+
+	var finished bool
+
+	for !finished {
+		e.SetStatusMessage(prompt)
 		e.Render()
 
 		k, err := readKey()
 		if err != nil {
-			return "", false, err
+			return err
 		}
 
-		switch k {
-		case keyDelete, keyBackspace, Key(ctrl('h')):
-			if len(text) != 0 {
-				text = text[:len(text)-1]
-			}
-		case keyEscape:
-			cancelled = true
-			break loop
-		case keyEnter:
-			break loop
-		default:
-
-			if isPrintable(k) {
-				text = append(text, rune(k))
-			}
-		}
-
-		if cb != nil {
-			cb(text, k)
-		}
+		prompt, finished = cb(k)
 	}
 
 	e.SetStatusMessage("")
-	return string(text), cancelled, nil
+	return nil
 }
 
 /*** find ***/
@@ -166,9 +177,29 @@ func (e *Editor) Find() error {
 	savedColOffset := e.colOffset
 	savedRowOffset := e.rowOffset
 
-//	var savedHl []SyntaxHL
+	var (
+		query []rune
+		found bool
+	)
 
-	onKeyPress := func(query []rune, k Key) {
+	onKeyPress := func(k Key) (string, bool) {
+
+		switch k {
+		case keyDelete, keyBackspace, Key(ctrl('h')):
+			if len(query) != 0 {
+				query = query[:len(query)-1]
+			}
+		case keyEscape:
+			return "", true
+		case keyEnter:
+			found = true
+			return "", true
+		default:
+			if isPrintable(k) {
+				query = append(query, rune(k))
+			}
+		}
+
 		// search for query and set e.cy, e.cx, e.rowOffset values.
 		for i, row := range e.rows[e.cy:] {
 
@@ -185,25 +216,28 @@ func (e *Editor) Find() error {
 			// set rowOffset to bottom so that the next scroll() will scroll
 			// upwards and the matching line will be at the top of the screen
 			e.rowOffset = len(e.rows)
-//
-//			// highlight the matched string
-//			savedHl = make([]SyntaxHL, len(row.hl))
-//			copy(savedHl, row.hl)
-//			for i := range query {
-//				row.hl[rx+i] = hlMatch
-//			}
+			//
+			//			// highlight the matched string
+			//			savedHl = make([]SyntaxHL, len(row.hl))
+			//			copy(savedHl, row.hl)
+			//			for i := range query {
+			//				row.hl[rx+i] = hlMatch
+			//			}
 
-			return
+			break
 		}
+
+		return string(query), false
+
 	}
 
-	_, canceled, err := e.Prompt("Search: %s", onKeyPress)
+	err := e.Prompt("Search: %s", onKeyPress)
 
 	// Get rid of the search highlight
 	e.updateRow(e.rows[e.cy])
 
 	// restore cursor position when the user cancels search
-	if canceled {
+	if !found {
 		e.cx = savedCx
 		e.cy = savedCy
 		e.colOffset = savedColOffset
