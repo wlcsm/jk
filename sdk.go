@@ -1,29 +1,33 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"log"
+)
 
 type SDK interface {
 	InsertChar(c rune)
 	DeleteChar()
 	DeleteRow(at int)
 	Find() error
+	BackWord() int
 	ForwardWord()
-	BackWord()
 	InsertNewline()
 	IsModified() bool
 
 	OpenFile(f string) error
 	Prompt(prompt string, cb func(k Key) (string, bool)) error
 	StaticPrompt(prompt string) (string, error)
-	Save() (int, error)
-	SetStatusMessage(format string, args ...interface{})
+	Save() error
+	SetMessage(format string, args ...interface{})
+	Filename() string
 
 	// Delete until the rune
-	DeleteUntil(s rune)
+	DeleteUntil(i int)
 	// Search to the left until the predicate matches
-	FindLeft(f func(s rune) bool) (int, bool)
+	FindLeft(x, y int, f func(s rune) bool) (int, bool)
 	// Search to the left for a specific rune
-	FindRuneLeft(r rune) (int, bool)
+	FindRuneLeft(x, y int, r rune) (int, bool)
 	// Search to the left until the predicate matches
 	FindRight(func(r rune) bool) (int, bool)
 	// Search to the right for a specific rune
@@ -55,6 +59,10 @@ type SDK interface {
 	ScreenTop() int
 	ScreenLeft() int
 	ScreenRight() int
+}
+
+func (e *Editor) Filename() string {
+	return e.filename
 }
 
 func (e *Editor) IsModified() bool {
@@ -166,7 +174,7 @@ func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) error {
 	var finished bool
 
 	for !finished {
-		e.SetStatusMessage(prompt)
+		e.SetMessage(prompt)
 		e.Render()
 
 		k, err := readKey()
@@ -177,7 +185,7 @@ func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) error {
 		prompt, finished = cb(k)
 	}
 
-	e.SetStatusMessage("")
+	e.SetMessage("")
 	return nil
 }
 
@@ -196,13 +204,13 @@ func (e *Editor) Find() error {
 
 	onKeyPress := func(k Key) (string, bool) {
 		switch k {
-		case keyDelete, keyBackspace, Key(ctrl('h')):
+		case keyDelete, keyBackspace:
 			if len(query) != 0 {
 				query = query[:len(query)-1]
 			}
 		case keyEscape:
 			return "", true
-		case keyEnter:
+		case keyEnter, keyCarriageReturn:
 			found = true
 			return "", true
 		default:
@@ -213,35 +221,32 @@ func (e *Editor) Find() error {
 
 		// search for query and set e.cy, e.cx, e.rowOffset values.
 		for i, row := range e.rows[e.cy:] {
-
 			index := findSubstring(row.chars, query)
 			if index == -1 {
 				continue
 			}
 
 			// match found
-			e.cy = i
+			e.cy += i
 			e.cx = index
 
-			// TODO feel like there is a better way to do this, should decouple this behaviour
-			// set rowOffset to bottom so that the next scroll() will scroll
-			// upwards and the matching line will be at the top of the screen
-			e.rowOffset = len(e.rows)
-			//
-			//			// highlight the matched string
-			//			savedHl = make([]SyntaxHL, len(row.hl))
-			//			copy(savedHl, row.hl)
-			//			for i := range query {
-			//				row.hl[rx+i] = hlMatch
-			//			}
+			// Try to make the text in the middle of the screen
+			e.SetRowOffset(e.cy - e.screenRows/2)
+
+			// highlight the matched string
+			savedHl := make([]SyntaxHL, len(row.hl))
+			copy(savedHl, row.hl)
+			for i := range query {
+				row.hl[index+i] = hlMatch
+			}
 
 			break
 		}
 
-		return string(query), false
+		return "Search: " + string(query), false
 	}
 
-	err := e.Prompt("Search: %s", onKeyPress)
+	err := e.Prompt("Search: ", onKeyPress)
 
 	// Get rid of the search highlight
 	e.updateRow(e.rows[e.cy])
@@ -257,6 +262,23 @@ func (e *Editor) Find() error {
 	return err
 }
 
+func (e *Editor) SetRowOffset(y int) {
+	if y < 0 {
+		y = 0
+	}
+
+	e.rowOffset = y
+}
+
+func (e *Editor) SetColOffset(x int) {
+	if x < 0 {
+		x = 0
+	}
+
+	e.colOffset = x
+}
+
+// return the place where the substring starts
 func findSubstring(text, query []rune) int {
 outer:
 	for i := range text {
@@ -306,21 +328,19 @@ func (e *Editor) InsertRow(at int, chars string) {
 	e.rows[at] = row
 }
 
-func (e *Editor) DeleteUntil(s rune) {
-	i, _ := e.FindRuneLeft(s)
-
+func (e *Editor) DeleteUntil(x int) {
 	row := e.rows[e.cy]
-	row.chars = append(row.chars[:i+1], row.chars[e.cx:]...)
-	e.cx = i + 1
+	row.chars = append(row.chars[:x], row.chars[e.cx:]...)
+	e.cx = x
 
 	e.updateRow(row)
 }
 
-func (e *Editor) FindLeft(f func(s rune) bool) (int, bool) {
-	row := e.rows[e.cy]
+func (e *Editor) FindLeft(x, y int, f func(s rune) bool) (int, bool) {
+	row := e.rows[y]
 
 	// Find the first instance of the rune starting at the cursor
-	for i := e.cx - 1; i >= 0; i-- {
+	for i := x - 1; i >= 0; i-- {
 		if f(row.chars[i]) {
 			return i, true
 		}
@@ -329,8 +349,8 @@ func (e *Editor) FindLeft(f func(s rune) bool) (int, bool) {
 	return 0, false
 }
 
-func (e *Editor) FindRuneLeft(r rune) (int, bool) {
-	return e.FindLeft(func(s rune) bool { return r == s })
+func (e *Editor) FindRuneLeft(x, y int, r rune) (int, bool) {
+	return e.FindLeft(x, y, func(s rune) bool { return r == s })
 }
 
 func (e *Editor) FindRuneRight(s rune) (int, bool) {
@@ -418,19 +438,6 @@ func (e *Editor) SetRelativePosX(x int) {
 	e.WrapCursorX()
 }
 
-func Save(e *Editor) {
-	n, err := e.Save()
-	if err != nil {
-		if err == ErrPromptCanceled {
-			e.SetStatusMessage("Save aborted")
-		} else {
-			e.SetStatusMessage("Can't save! I/O error: %s", err.Error())
-		}
-	} else {
-		e.SetStatusMessage("%d bytes written to disk", n)
-	}
-}
-
 func (e *Editor) SetMode(m EditorMode) {
 	e.Mode = m
 
@@ -456,21 +463,26 @@ func (e *Editor) SetMode(m EditorMode) {
 func (e *Editor) StaticPrompt(prompt string) (input string, err error) {
 	canceled := false
 	err = e.Prompt(prompt, func(k Key) (string, bool) {
+		log.Printf("key is: %s", string(k))
 		switch k {
-		case keyEnter:
+		case keyEnter, keyCarriageReturn:
 			return "", true
-		case keyEscape:
+		case keyEscape, Key(ctrl('q')):
 			canceled = true
 			return "", true
+		case keyBackspace, keyDelete:
+			if len(input) > 0 {
+				input = input[:len(input)-1]
+			}
 		default:
 			if isPrintable(k) {
 				input += string(k)
 			}
-
-			return prompt + input, false
 		}
+
+		return prompt + input, false
 	})
-	e.SetStatusMessage("")
+	e.SetMessage("")
 
 	if err != nil {
 		return "", err

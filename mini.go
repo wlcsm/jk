@@ -10,18 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/pkg/errors"
 	"golang.org/x/term"
-)
-
-var (
-	stdinfd  = int(os.Stdin.Fd())
-	stdoutfd = int(os.Stdout.Fd())
 )
 
 var ErrQuitEditor = errors.New("quit editor")
@@ -50,6 +44,8 @@ type Editor struct {
 	screenRows int
 	screenCols int
 
+	showWelcomeScreen bool
+
 	// file content
 	rows []*Row
 
@@ -59,9 +55,9 @@ type Editor struct {
 	filename string
 
 	// status message and time the message was set
-	statusmsg     string
-	statusmsgTime time.Time
+	statusmsg string
 
+	// General settings like tabstop
 	cfg DisplayConfig
 
 	// specify which syntax highlight to use.
@@ -96,9 +92,10 @@ type Key int32
 // Assign an arbitrary large number to the following special keys
 // to avoid conflicts with the normal keys.
 const (
-	keyEnter     Key = 10
-	keyBackspace Key = 127
-	keyEscape    Key = '\x1b'
+	keyEnter          Key = 10
+	keyCarriageReturn Key = 13
+	keyBackspace      Key = 127
+	keyEscape         Key = '\x1b'
 
 	keyArrowLeft Key = iota + 1000
 	keyArrowRight
@@ -218,7 +215,7 @@ func (e *Editor) ProcessKey() error {
 		}
 
 		if handled {
-			break
+			return nil
 		}
 	}
 
@@ -256,8 +253,9 @@ func (e *Editor) drawRow(w io.Writer, y int) {
 	if filerow >= len(e.rows) {
 		// The display message should not be here, you should not be
 		// able to get back to it once passed
-		if len(e.rows) == 0 && y == e.screenRows/3 {
+		if e.showWelcomeScreen && len(e.rows) == 0 && y == e.screenRows/3 {
 			e.displayWelcomeMessage(w)
+			e.showWelcomeScreen = false
 		} else {
 			w.Write([]byte("~"))
 		}
@@ -332,16 +330,16 @@ func utf8Slice(s string, start, end int) string {
 	return string([]rune(s)[start:end])
 }
 
+var ClearFromCusorToEndOfLine = []byte("\x1b[K")
+
 func (e *Editor) drawMessageBar(b *strings.Builder) {
-	b.Write([]byte("\x1b[K"))
+	b.Write(ClearFromCusorToEndOfLine)
 	msg := e.statusmsg
 	if runewidth.StringWidth(msg) > e.screenCols {
 		msg = runewidth.Truncate(msg, e.screenCols, "...")
 	}
-	// show the message if it's less than 5s old.
-	if time.Since(e.statusmsgTime) < 5*time.Second {
-		b.WriteString(msg)
-	}
+
+	b.Write([]byte(msg))
 }
 
 // Cursor position (which is calculated in runes) to the visual position
@@ -423,9 +421,8 @@ func (e *Editor) Render() {
 	os.Stdout.WriteString(b.String())
 }
 
-func (e *Editor) SetStatusMessage(format string, a ...interface{}) {
+func (e *Editor) SetMessage(format string, a ...interface{}) {
 	e.statusmsg = fmt.Sprintf(format, a...)
-	e.statusmsgTime = time.Now()
 }
 
 func getCursorPosition() (row, col int, err error) {
@@ -448,44 +445,33 @@ func isArrowKey(k Key) bool {
 	return k == keyArrowUp || k == keyArrowRight || k == keyArrowDown || k == keyArrowLeft
 }
 
-func (e *Editor) Save() (int, error) {
-	return 0, nil
-	//	// TODO: write to a new temp file, and then rename that file to the
-	//	// actual file the user wants to overwrite, checking errors through
-	//	// the whole process.
-	//	if len(e.filename) == 0 {
-	//		err := e.Prompt("Save as: %s (ESC to cancel)", nil)
-	//		if err != nil {
-	//			return 0, err
-	//		}
-	//		if cancelled {
-	//			return 0, ErrPromptCanceled
-	//		}
-	//
-	//		e.filename = fname
-	//	}
-	//
-	//	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	//	if err != nil {
-	//		return 0, err
-	//	}
-	//	defer f.Close()
-	//	n, err := f.WriteString(e.rowsToString())
-	//	if err != nil {
-	//		return 0, err
-	//	}
-	//
-	//	e.modified = false
-	//	return n, nil
-}
+func (e *Editor) Save() error {
+	if len(e.filename) == 0 {
+		filename, err := e.StaticPrompt("Save as: %s (ESC to cancel)")
+		if err != nil {
+			return err
+		}
 
-func (e *Editor) rowsToString() string {
-	var b strings.Builder
-	for _, row := range e.rows {
-		b.WriteString(string(row.chars))
-		b.WriteRune('\n')
+		e.filename = filename
 	}
-	return b.String()
+
+	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for _, row := range e.rows {
+		if _, err := f.Write([]byte(string(row.chars))); err != nil {
+			return err
+		}
+		if _, err := f.Write([]byte{'\n'}); err != nil {
+			return err
+		}
+	}
+
+	e.modified = false
+	return nil
 }
 
 // Fairly basic version. Probably can make it faster *if need be*
@@ -523,6 +509,13 @@ func (e *Editor) OpenFile(filename string) error {
 	e.detectSyntax()
 
 	f, err := os.Open(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = os.Create(filename)
+		e.modified = true
+	} else {
+		e.modified = false
+	}
+
 	if err != nil {
 		return err
 	}
@@ -542,7 +535,6 @@ func (e *Editor) OpenFile(filename string) error {
 		return err
 	}
 
-	e.modified = false
 	return nil
 }
 
@@ -690,11 +682,13 @@ func (e *Editor) updateHighlight(row *Row) {
 			}
 		}
 
-		if kw, hl := e.checkIfKeyword(runes[idx:]); kw != "" {
-			end := idx + len(kw)
-			for idx < end {
-				row.hl[idx] = hl
-				idx++
+		if prevSep {
+			if kw, hl := e.checkIfKeyword(runes[idx:]); kw != "" {
+				end := idx + len(kw)
+				for idx < end {
+					row.hl[idx] = hl
+					idx++
+				}
 			}
 		}
 
@@ -759,6 +753,7 @@ func main() {
 
 	var editor Editor
 
+	// Set the terminal to raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		panic(err)
@@ -775,8 +770,6 @@ func main() {
 			die(err)
 		}
 	}
-
-	editor.SetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find")
 
 	for {
 		editor.Render()

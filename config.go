@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/mattn/go-runewidth"
@@ -42,6 +43,7 @@ var BasicMap = KeyMap{
 }
 
 func basicHandler(e SDK, k Key) (bool, error) {
+	log.Printf("just pressed: %s", string(k))
 	if f, ok := basicMapping[k]; ok {
 		return true, f(e)
 	}
@@ -101,13 +103,39 @@ var basicMapping = map[Key]func(e SDK) error{
 		return ErrQuitEditor
 	},
 	Key(ctrl('s')): func(e SDK) error {
-		e.Save()
+		if err := e.Save(); err != nil {
+			return err
+		}
+
+		log.Println("should have saved")
+		e.SetMessage("saved file: %s", e.Filename())
 		return nil
+	},
+	// Open a new file
+	Key(ctrl('e')): func(e SDK) error {
+		filename, err := e.StaticPrompt("File name: ")
+		if errors.Is(err, ErrPromptCanceled) {
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if len(filename) == 0 {
+			return fmt.Errorf("No file name")
+		}
+
+		if err = e.OpenFile(filename); errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("File doesn't exist")
+		}
+
+		return err
 	},
 	Key(ctrl('f')): func(e SDK) error {
 		err := e.Find()
 		if err == ErrPromptCanceled {
-			e.SetStatusMessage("")
+			e.SetMessage("")
 		}
 
 		if err != nil {
@@ -116,7 +144,7 @@ var basicMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key(ctrl('W')): func(e SDK) error {
-		e.DeleteUntil(rune(' '))
+		e.DeleteUntil(e.BackWord())
 		return nil
 	},
 }
@@ -142,6 +170,10 @@ var insertModeMapping = map[Key]func(e SDK) error{
 		e.InsertNewline()
 		return nil
 	},
+	keyCarriageReturn: func(e SDK) error {
+		e.InsertNewline()
+		return nil
+	},
 	Key(ctrl('c')): func(e SDK) error {
 		e.SetMode(CommandMode)
 		return nil
@@ -163,27 +195,6 @@ func commandModeHandler(e SDK, k Key) (bool, error) {
 }
 
 var commandModeMapping = map[Key]func(e SDK) error{
-	// Open a new file
-	Key(ctrl('e')): func(e SDK) error {
-		filename, err := e.StaticPrompt("File name: ")
-		if errors.Is(err, ErrPromptCanceled) {
-			return nil
-		}
-
-		if err != nil {
-			return err
-		}
-
-		if len(filename) == 0 {
-			return fmt.Errorf("No file name")
-		}
-
-		if err = e.OpenFile(filename); errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("File doesn't exist")
-		}
-
-		return err
-	},
 	Key('j'): func(e SDK) error {
 		e.SetRelativePosY(1)
 		return nil
@@ -235,7 +246,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('b'): func(e SDK) error {
-		e.BackWord()
+		e.SetPosX(e.BackWord())
 		return nil
 	},
 }
@@ -258,31 +269,25 @@ func (e *Editor) ForwardWord() {
 	e.SetPosX(i)
 }
 
-func (e *Editor) BackWord() {
-	i, ok := e.FindLeft(func(r rune) bool {
+func (e *Editor) BackWord() int {
+	x, y := e.CX(), e.CY()
+	i, _ := e.FindLeft(x, y, func(r rune) bool {
 		return r == ' ' || r == '\t'
 	})
-	if !ok {
-		e.SetPosX(0)
-		return
-	}
 
 	// If the cursor is already at the beginning of the word, go to
 	// the beginning of the next word
-	if i == e.cx-1 {
-		i, _ = e.FindLeft(func(r rune) bool {
+	if i == x-1 {
+		i, _ = e.FindLeft(i, y, func(r rune) bool {
 			return r != ' ' && r != '\t'
 		})
-		e.SetPosX(i)
 
-		i, _ = e.FindLeft(func(r rune) bool {
+		i, _ = e.FindLeft(i, y, func(r rune) bool {
 			return r == ' ' || r == '\t'
 		})
-
-		e.SetPosX(i)
 	}
 
-	e.SetPosX(i + 1)
+	return i
 }
 
 func (e *Editor) drawStatusBar(b io.Writer) {
