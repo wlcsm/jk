@@ -26,12 +26,8 @@ type SDK interface {
 	DeleteUntil(i int)
 	// Search to the left until the predicate matches
 	FindLeft(x, y int, f func(s rune) bool) (int, bool)
-	// Search to the left for a specific rune
-	FindRuneLeft(x, y int, r rune) (int, bool)
 	// Search to the left until the predicate matches
 	FindRight(func(r rune) bool) (int, bool)
-	// Search to the right for a specific rune
-	FindRuneRight(s rune) (int, bool)
 
 	// Set the absolute position of the cursor's y (wrapped)
 	SetPosY(y int)
@@ -45,8 +41,6 @@ type SDK interface {
 	// Wrap the cursor to keep it in bounds
 	WrapCursorY()
 
-	SetRelativePosY(y int)
-	SetRelativePosX(x int)
 	SetMode(m EditorMode)
 
 	SetRow(at int, chars string)
@@ -97,6 +91,7 @@ func (row *Row) insertChar(at int, c rune) {
 	if at < 0 || at > len(row.chars) {
 		at = len(row.chars)
 	}
+
 	row.chars = append(row.chars, 0) // make room
 	copy(row.chars[at+1:], row.chars[at:])
 	row.chars[at] = c
@@ -117,9 +112,10 @@ func (e *Editor) InsertChar(c rune) {
 	if e.cy == len(e.rows) {
 		e.InsertRow(len(e.rows), "")
 	}
+
 	row := e.rows[e.cy]
 	row.insertChar(e.cx, c)
-	e.updateRow(row)
+	e.updateRow(e.cy)
 	e.cx++
 	e.modified = true
 }
@@ -131,31 +127,29 @@ func (e *Editor) DeleteChar() {
 	if e.cx == 0 && e.cy == 0 {
 		return
 	}
+
 	row := e.rows[e.cy]
 	if e.cx > 0 {
 		row.deleteChar(e.cx - 1)
-		e.updateRow(row)
+		e.updateRow(e.cy)
 		e.cx--
 		e.modified = true
 	} else {
 		prevRow := e.rows[e.cy-1]
 		e.cx = len(prevRow.chars)
 		prevRow.appendChars(row.chars)
-		e.updateRow(prevRow)
 		e.DeleteRow(e.cy)
+		e.updateHighlight(e.cy)
 		e.cy--
 	}
 }
 
 func (e *Editor) DeleteRow(at int) {
-	if at < 0 || at >= len(e.rows) {
+	if at < 0 || len(e.rows) <= at {
 		return
 	}
 
 	e.rows = append(e.rows[:at], e.rows[at+1:]...)
-	for i := at; i < len(e.rows); i++ {
-		e.rows[i].idx--
-	}
 
 	e.modified = true
 	e.WrapCursorY()
@@ -249,7 +243,7 @@ func (e *Editor) Find() error {
 	err := e.Prompt("Search: ", onKeyPress)
 
 	// Get rid of the search highlight
-	e.updateRow(e.rows[e.cy])
+	e.updateRow(e.cy)
 
 	// restore cursor position when the user cancels search
 	if !found {
@@ -282,8 +276,8 @@ func (e *Editor) SetColOffset(x int) {
 func findSubstring(text, query []rune) int {
 outer:
 	for i := range text {
-		for j, q := range query {
-			if text[i+j] != q {
+		for j := range query {
+			if text[i+j] != query[j] {
 				continue outer
 			}
 		}
@@ -300,7 +294,7 @@ func (e *Editor) SetRow(at int, chars string) {
 	}
 
 	e.rows[at].chars = []rune(chars)
-	e.updateRow(e.rows[at])
+	e.updateRow(at)
 
 	// Make sure to wrap the cursor
 	if e.cy == at {
@@ -312,20 +306,23 @@ func (e *Editor) InsertRow(at int, chars string) {
 	if at < 0 || at > len(e.rows) {
 		return
 	}
+
 	row := &Row{chars: []rune(chars)}
-	row.idx = at
 	if at > 0 {
 		row.hasUnclosedComment = e.rows[at-1].hasUnclosedComment
 	}
-	e.updateRow(row)
 
 	// grow the buffer
 	e.rows = append(e.rows, &Row{})
 	copy(e.rows[at+1:], e.rows[at:])
-	for i := at + 1; i < len(e.rows); i++ {
-		e.rows[i].idx++
-	}
 	e.rows[at] = row
+
+	e.updateRow(at)
+
+	// adjust the cursor
+	if at <= e.cy {
+		e.cy++
+	}
 }
 
 func (e *Editor) DeleteUntil(x int) {
@@ -333,7 +330,7 @@ func (e *Editor) DeleteUntil(x int) {
 	row.chars = append(row.chars[:x], row.chars[e.cx:]...)
 	e.cx = x
 
-	e.updateRow(row)
+	e.updateRow(e.cy)
 }
 
 func (e *Editor) FindLeft(x, y int, f func(s rune) bool) (int, bool) {
@@ -347,14 +344,6 @@ func (e *Editor) FindLeft(x, y int, f func(s rune) bool) (int, bool) {
 	}
 
 	return 0, false
-}
-
-func (e *Editor) FindRuneLeft(x, y int, r rune) (int, bool) {
-	return e.FindLeft(x, y, func(s rune) bool { return r == s })
-}
-
-func (e *Editor) FindRuneRight(s rune) (int, bool) {
-	return e.FindRight(func(r rune) bool { return r == s })
 }
 
 func (e *Editor) FindRight(f func(s rune) bool) (int, bool) {
@@ -425,16 +414,6 @@ func (e *Editor) WrapCursorY() {
 
 func (e *Editor) SetPosX(x int) {
 	e.cx = x
-	e.WrapCursorX()
-}
-
-func (e *Editor) SetRelativePosY(y int) {
-	e.cy += y
-	e.WrapCursorY()
-}
-
-func (e *Editor) SetRelativePosX(x int) {
-	e.cx += x
 	e.WrapCursorX()
 }
 

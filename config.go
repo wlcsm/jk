@@ -65,19 +65,19 @@ var basicMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	keyArrowUp: func(e SDK) error {
-		e.SetRelativePosY(-1)
+		e.SetPosY(e.CY() - 1)
 		return nil
 	},
 	keyArrowDown: func(e SDK) error {
-		e.SetRelativePosY(1)
+		e.SetPosY(e.CY() + 1)
 		return nil
 	},
 	keyArrowLeft: func(e SDK) error {
-		e.SetRelativePosX(-1)
+		e.SetPosX(e.CX() - 1)
 		return nil
 	},
 	keyArrowRight: func(e SDK) error {
-		e.SetRelativePosX(1)
+		e.SetPosX(e.CX() + 1)
 		return nil
 	},
 	Key(ctrl('q')): func(e SDK) error {
@@ -196,19 +196,19 @@ func commandModeHandler(e SDK, k Key) (bool, error) {
 
 var commandModeMapping = map[Key]func(e SDK) error{
 	Key('j'): func(e SDK) error {
-		e.SetRelativePosY(1)
+		e.SetPosY(e.CY() + 1)
 		return nil
 	},
 	Key('k'): func(e SDK) error {
-		e.SetRelativePosY(-1)
+		e.SetPosY(e.CY() - 1)
 		return nil
 	},
 	Key('h'): func(e SDK) error {
-		e.SetRelativePosX(-1)
+		e.SetPosX(e.CX() - 1)
 		return nil
 	},
 	Key('l'): func(e SDK) error {
-		e.SetRelativePosX(1)
+		e.SetPosX(e.CX() + 1)
 		return nil
 	},
 	Key('i'): func(e SDK) error {
@@ -217,7 +217,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 	},
 	Key('o'): func(e SDK) error {
 		e.InsertRow(e.CY()+1, "")
-		e.SetRelativePosY(1)
+		e.SetPosY(e.CY() + 1)
 		e.SetMode(InsertMode)
 		return nil
 	},

@@ -109,8 +109,6 @@ const (
 )
 
 type Row struct {
-	// Index within the file.
-	idx int
 	// Raw character data for the row as an array of runes.
 	chars []rune
 	// Actual chracters to draw on the screen.
@@ -493,8 +491,8 @@ func (e *Editor) detectSyntax() {
 			if (isExt && pattern == ext) ||
 				(!isExt && strings.Index(e.filename, pattern) != -1) {
 				e.syntax = syntax
-				for _, row := range e.rows {
-					e.updateHighlight(row)
+				for i := range e.rows {
+					e.updateHighlight(i)
 				}
 				return
 			}
@@ -524,11 +522,15 @@ func (e *Editor) OpenFile(filename string) error {
 	e.rows = make([]*Row, 0)
 
 	s := bufio.NewScanner(f)
-	for s.Scan() {
+	for i := 0; s.Scan(); i++ {
 		line := s.Bytes()
 		// strip off newline or cariage return
 		bytes.TrimRightFunc(line, func(r rune) bool { return r == '\n' || r == '\r' })
-		e.InsertRow(len(e.rows), string(line))
+		e.rows = append(e.rows, &Row{
+			chars: []rune(string(line)),
+		})
+
+		e.updateRow(i)
 	}
 
 	if err := s.Err(); err != nil {
@@ -548,39 +550,46 @@ func (e *Editor) InsertNewline() {
 		// invalidates the pointer.
 		row = e.rows[e.cy]
 		row.chars = row.chars[:e.cx]
-		e.updateRow(row)
+		e.updateRow(e.cy)
 	}
+
 	e.cy++
 	e.cx = 0
 }
 
-func (e *Editor) updateRow(row *Row) {
+func (e *Editor) updateRow(y int) {
 	var b strings.Builder
-	col := 0
+	row := e.rows[y]
+	cols := 0
 	for _, r := range row.chars {
 		if r != '\t' {
 			b.WriteRune(r)
+			cols += runewidth.RuneWidth(r)
 			continue
 		}
 
 		// each tab must advance the cursor forward at least one column
 		b.WriteRune(' ')
-		col++
+		cols++
 		// append spaces until we get to a tab stop
-		for col%e.cfg.Tabstop != 0 {
+		for cols%e.cfg.Tabstop != 0 {
 			b.WriteRune(' ')
-			col++
+			cols++
 		}
+
 	}
+
 	row.render = b.String()
-	e.updateHighlight(row)
+	e.updateHighlight(y)
 }
 
 func isSeparator(r rune) bool {
 	return unicode.IsSpace(r) || strings.IndexRune(",.()+-/*=~%<>[]{}:;", r) != -1
 }
 
-func (e *Editor) updateHighlight(row *Row) {
+func (e *Editor) updateHighlight(y int) {
+	row := e.rows[y]
+
 	// TODO why can't we just use len(row.chars)? for some reason this panics
 	row.hl = make([]SyntaxHL, utf8.RuneCountInString(row.render))
 	for i := range row.hl {
@@ -598,7 +607,7 @@ func (e *Editor) updateHighlight(row *Row) {
 	var strQuote rune
 
 	// indicates whether we are inside a multi-line comment.
-	inComment := row.idx > 0 && e.rows[row.idx-1].hasUnclosedComment
+	inComment := y > 0 && e.rows[y-1].hasUnclosedComment
 
 	idx := 0
 	runes := []rune(row.render)
@@ -698,8 +707,8 @@ func (e *Editor) updateHighlight(row *Row) {
 
 	changed := row.hasUnclosedComment != inComment
 	row.hasUnclosedComment = inComment
-	if changed && row.idx+1 < len(e.rows) {
-		e.updateHighlight(e.rows[row.idx+1])
+	if changed && y+1 < len(e.rows) {
+		e.updateHighlight(y + 1)
 	}
 }
 
