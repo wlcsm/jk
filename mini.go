@@ -16,7 +16,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 	"github.com/pkg/errors"
-	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 var (
@@ -66,9 +66,6 @@ type Editor struct {
 
 	// specify which syntax highlight to use.
 	syntax *EditorSyntax
-
-	// original termios: used to restore the state on exit.
-	origTermios *unix.Termios
 }
 
 type DisplayConfig struct {
@@ -80,33 +77,14 @@ var defaultDisplayConfig = DisplayConfig{
 }
 
 func (e *Editor) Init() error {
-	termios, err := enableRawMode()
+	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
 	if err != nil {
 		return err
 	}
 
-	e.origTermios = termios
-	ws, err := unix.IoctlGetWinsize(stdoutfd, unix.TIOCGWINSZ)
-	if err != nil || ws.Col == 0 {
-		// fallback: get window size by moving the cursor to bottom-right
-		// and getting the cursor position.
-		if _, err = os.Stdout.Write([]byte("\x1b[999C\x1b[999B")); err != nil {
-			return err
-		}
-
-		row, col, err := getCursorPosition()
-		if err != nil {
-			return err
-		}
-
-		e.screenRows = row
-		e.screenCols = col
-
-		return nil
-	}
-
-	e.screenRows = int(ws.Row) - 2 // make room for status-bar and message-bar
-	e.screenCols = int(ws.Col)
+	// make room for status-bar and message-bar
+	e.screenRows = rows - 2
+	e.screenCols = cols
 
 	e.cfg = defaultDisplayConfig
 	e.Mode = CommandMode
@@ -781,10 +759,15 @@ func main() {
 
 	var editor Editor
 
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		panic(err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
 	if err := editor.Init(); err != nil {
 		die(err)
 	}
-	defer editor.Close()
 
 	if len(os.Args) > 1 {
 		err := editor.OpenFile(os.Args[1])
@@ -818,32 +801,4 @@ func enableLogs() (*os.File, error) {
 	log.Println("Logging begin")
 
 	return f, nil
-}
-
-func (e *Editor) Close() error {
-	if e.origTermios == nil {
-		return fmt.Errorf("raw mode is not enabled")
-	}
-
-	// restore original termios.
-	return unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, e.origTermios)
-}
-
-func enableRawMode() (*unix.Termios, error) {
-	t, err := unix.IoctlGetTermios(stdinfd, ioctlReadTermios)
-	if err != nil {
-		return nil, err
-	}
-	raw := *t // make a copy to avoid mutating the original
-	raw.Iflag &^= unix.BRKINT | unix.INPCK | unix.ISTRIP | unix.IXON
-	// FIXME: figure out why this is not needed
-	// termios.Oflag &^= unix.OPOST
-	raw.Cflag |= unix.CS8
-	raw.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG | unix.IEXTEN
-	raw.Cc[unix.VMIN] = 0
-	raw.Cc[unix.VTIME] = 1
-	if err := unix.IoctlSetTermios(stdinfd, ioctlWriteTermios, &raw); err != nil {
-		return nil, err
-	}
-	return t, nil
 }
