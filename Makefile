@@ -1,5 +1,6 @@
 mini: mini.go
 install:
-	cp mini /usr/local/
+	/usr/local/go/bin/go build
+	cp ./mini /home/wlcsm/.local/bin/mini
 clean:
 	rm mini

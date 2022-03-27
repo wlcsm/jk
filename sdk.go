@@ -320,7 +320,7 @@ func (e *Editor) InsertRow(at int, chars string) {
 	e.updateRow(at)
 
 	// adjust the cursor
-	if at <= e.cy {
+	if at < e.cy {
 		e.cy++
 	}
 }

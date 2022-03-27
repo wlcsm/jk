@@ -43,7 +43,6 @@ var BasicMap = KeyMap{
 }
 
 func basicHandler(e SDK, k Key) (bool, error) {
-	log.Printf("just pressed: %s", string(k))
 	if f, ok := basicMapping[k]; ok {
 		return true, f(e)
 	}
@@ -103,6 +102,7 @@ var basicMapping = map[Key]func(e SDK) error{
 		return ErrQuitEditor
 	},
 	Key(ctrl('s')): func(e SDK) error {
+		log.Printf("attempting to save: %s\n", e.Filename())
 		if err := e.Save(); err != nil {
 			return err
 		}

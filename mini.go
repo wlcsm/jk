@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"unicode"
@@ -124,13 +125,6 @@ func ctrl(char byte) byte {
 	return char & 0x1f
 }
 
-func die(err error) {
-	os.Stdout.WriteString("\x1b[2J") // clear the screen
-	os.Stdout.WriteString("\x1b[H")  // reposition the cursor
-	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	os.Exit(1)
-}
-
 var escapeCodeToKey = map[string]Key{
 	"\x1b[A":  keyArrowUp,
 	"\x1b[B":  keyArrowDown,
@@ -207,6 +201,8 @@ func (e *Editor) ProcessKey() error {
 	}
 
 	for _, keymap := range Keymapping {
+		log.Printf("just pressed: %s", string(k))
+
 		handled, err := keymap.Handler(e, k)
 		if err != nil {
 			return err
@@ -297,8 +293,7 @@ func (e *Editor) drawRow(w io.Writer, y int) {
 				setColor(w, currentColor)
 			}
 		} else {
-			color := SyntaxToColor(hl[i])
-			if color != currentColor {
+			if color := SyntaxToColor(hl[i]); color != currentColor {
 				currentColor = color
 				setColor(w, color)
 			}
@@ -754,9 +749,19 @@ func checkKeywordMatch(keywords []string, text []rune) string {
 }
 
 func main() {
+	defer func() {
+		os.Stdout.WriteString(ClearScreenCode)
+		os.Stdout.WriteString(RepositionCursorCode)
+		if err := recover(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %+v\n", err)
+			fmt.Fprintf(os.Stderr, "stack: %s\n", debug.Stack())
+			os.Exit(1)
+		}
+	}()
+
 	f, err := enableLogs()
 	if err != nil {
-		die(err)
+		panic(err)
 	}
 	defer f.Close()
 
@@ -767,16 +772,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
 	if err := editor.Init(); err != nil {
-		die(err)
+		panic(err)
 	}
 
 	if len(os.Args) > 1 {
 		err := editor.OpenFile(os.Args[1])
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			die(err)
+			panic(err)
 		}
 	}
 
@@ -786,12 +792,12 @@ func main() {
 			if err == ErrQuitEditor {
 				break
 			}
-			die(err)
+			panic(err)
 		}
 	}
 }
 
-var LogFile = "mini.log"
+var LogFile = "/home/wlcsm/go/src/github.com/mini/mini.log"
 
 func enableLogs() (*os.File, error) {
 	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
