@@ -114,4 +114,20 @@ var HLDB = []*EditorSyntax{
 		highlightStrings: true,
 		highlightNumbers: true,
 	},
+	{
+		filetype:  "html",
+		filematch: []string{".html", ".htm", ".vue"},
+		keywords: []string{
+			"!DOCTYPE", "html", "head", "meta", "link", "r",
+			"title", "body", "script", "div",
+		},
+		keywords2: []string{
+			"rel", "name", "content", "href", "type", "id", "charset",
+		},
+		scs:              "",
+		mcs:              "<!--",
+		mce:              "-->",
+		highlightStrings: true,
+		highlightNumbers: true,
+	},
 }

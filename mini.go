@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -147,6 +149,7 @@ var escapeCodeToKey = map[string]Key{
 func readKey() (Key, error) {
 	buf := make([]byte, 4)
 	for {
+		log.Printf("surprise log")
 		n, err := os.Stdin.Read(buf)
 		if err != nil && err != io.EOF {
 			return 0, err
@@ -749,13 +752,47 @@ func checkKeywordMatch(keywords []string, text []rune) string {
 }
 
 func main() {
+	if ok := Run(); ok {
+		os.Exit(2)
+	}
+}
+
+type DisplaySettings struct {
+	X         int `json:"x"`
+	Y         int `json:"y"`
+	RowOffset int `json:"row_offset"`
+	ColOffset int `json:"col_offset"`
+}
+
+func Run() bool {
+	var cfg DisplaySettings
+	argIndex := 1
+	if len(os.Args) == 3 {
+		if os.Args[1] == "-z" {
+			out, err := os.ReadFile(CacheFile)
+			if err != nil {
+				panic(err)
+			}
+
+			if err = json.Unmarshal(out, &cfg); err != nil {
+				panic(err)
+			}
+
+			argIndex = 2
+		}
+	}
+
+	restarted := false
+
 	defer func() {
-		os.Stdout.WriteString(ClearScreenCode)
-		os.Stdout.WriteString(RepositionCursorCode)
-		if err := recover(); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %+v\n", err)
-			fmt.Fprintf(os.Stderr, "stack: %s\n", debug.Stack())
-			os.Exit(1)
+		if !restarted {
+			os.Stdout.WriteString(ClearScreenCode)
+			os.Stdout.WriteString(RepositionCursorCode)
+			if err := recover(); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %+v\n", err)
+				fmt.Fprintf(os.Stderr, "stack: %s\n", debug.Stack())
+				os.Exit(1)
+			}
 		}
 	}()
 
@@ -765,8 +802,6 @@ func main() {
 	}
 	defer f.Close()
 
-	var editor Editor
-
 	// Set the terminal to raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -775,12 +810,18 @@ func main() {
 
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
+	var editor Editor
 	if err := editor.Init(); err != nil {
 		panic(err)
 	}
 
+	editor.cx = cfg.X
+	editor.cy = cfg.Y
+	editor.rowOffset = cfg.RowOffset
+	editor.colOffset = cfg.ColOffset
+
 	if len(os.Args) > 1 {
-		err := editor.OpenFile(os.Args[1])
+		err := editor.OpenFile(os.Args[argIndex])
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			panic(err)
 		}
@@ -788,16 +829,66 @@ func main() {
 
 	for {
 		editor.Render()
+		log.Println("hello")
 		if err := editor.ProcessKey(); err != nil {
 			if err == ErrQuitEditor {
 				break
 			}
+			if err == RestartEditor {
+				if err := editor.saveDisplay(); err != nil {
+					panic(err)
+				}
+				if err := editor.rebuild(); err != nil {
+					panic(err)
+				}
+
+				restarted = true
+				return true
+			}
+
 			panic(err)
 		}
 	}
+
+	return false
 }
 
-var LogFile = "/home/wlcsm/go/src/github.com/mini/mini.log"
+var RestartEditor = fmt.Errorf("yes")
+
+func (e *Editor) rebuild() error {
+	log.Println("befoere rebuild")
+	cmd := exec.Command("make", "install")
+	cmd.Dir = "/home/wlcsm/go/src/github.com/mini"
+
+	log.Println("befoere rebuild")
+	l, err := cmd.Output()
+	log.Printf("rebuilding returned: %s", l)
+	if err != nil {
+		log.Printf("rebuilding error: %+v", err)
+		return errors.Wrap(err, "here")
+	}
+
+	return nil
+}
+
+func (e *Editor) saveDisplay() error {
+	out, err := json.Marshal(DisplaySettings{
+		X:         e.cx,
+		Y:         e.cy,
+		RowOffset: e.rowOffset,
+		ColOffset: e.colOffset,
+	})
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(CacheFile, out, 0o644)
+}
+
+var (
+	LogFile   = "/home/wlcsm/go/src/github.com/mini/mini.log"
+	CacheFile = "/home/wlcsm/go/src/github.com/mini/cache.json"
+)
 
 func enableLogs() (*os.File, error) {
 	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)

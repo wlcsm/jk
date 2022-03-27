@@ -143,9 +143,12 @@ var basicMapping = map[Key]func(e SDK) error{
 		}
 		return nil
 	},
-	Key(ctrl('W')): func(e SDK) error {
+	Key(ctrl('w')): func(e SDK) error {
 		e.DeleteUntil(e.BackWord())
 		return nil
+	},
+	Key(ctrl('r')): func(e SDK) error {
+		return RestartEditor
 	},
 }
 
