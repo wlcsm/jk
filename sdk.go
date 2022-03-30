@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 )
 
 type SDK interface {
@@ -17,7 +19,7 @@ type SDK interface {
 
 	OpenFile(f string) error
 	Prompt(prompt string, cb func(k Key) (string, bool)) error
-	StaticPrompt(prompt string) (string, error)
+	StaticPrompt(prompt string, cmpl CompletionFunc) (string, error)
 	Save() error
 	SetMessage(format string, args ...interface{})
 	Filename() string
@@ -49,10 +51,54 @@ type SDK interface {
 	CX() int
 	CY() int
 
+	Cols() int
+	Rows() int
+
+	CenterCursor()
+
 	ScreenBottom() int
 	ScreenTop() int
 	ScreenLeft() int
 	ScreenRight() int
+}
+
+type CompletionFunc func(a string) ([]string, error)
+
+func FileCompletion(a string) ([]string, error) {
+	files, err := os.ReadDir(".")
+	if err != nil {
+		return nil, err
+	}
+
+	var res []string
+	for _, f := range files {
+		if !strings.HasPrefix(f.Name(), a) {
+			continue
+		}
+
+		if f.IsDir() {
+			res = append(res, f.Name()+"/")
+		} else if f.Type().IsRegular() {
+			res = append(res, f.Name())
+		}
+	}
+
+	return res, nil
+}
+
+func (e *Editor) CenterCursor() {
+	e.rowOffset = e.cy - (e.screenRows / 2)
+	if e.rowOffset < 0 {
+		e.rowOffset = 0
+	}
+}
+
+func (e *Editor) Rows() int {
+	return e.screenRows
+}
+
+func (e *Editor) Cols() int {
+	return e.screenCols
 }
 
 func (e *Editor) Filename() string {
@@ -439,7 +485,7 @@ func (e *Editor) SetMode(m EditorMode) {
 
 // StaticPrompt is a "normal" prompt designed to only get input from the user.
 // It you want things to happen when you press any key, then use Prompt
-func (e *Editor) StaticPrompt(prompt string) (input string, err error) {
+func (e *Editor) StaticPrompt(prompt string, comp CompletionFunc) (input string, err error) {
 	canceled := false
 	err = e.Prompt(prompt, func(k Key) (string, bool) {
 		log.Printf("key is: %s", string(k))
@@ -453,6 +499,23 @@ func (e *Editor) StaticPrompt(prompt string) (input string, err error) {
 			if len(input) > 0 {
 				input = input[:len(input)-1]
 			}
+		case Key('\t'):
+			log.Println("try completion")
+
+			if comp == nil {
+				break
+			}
+
+			opts, err := comp(input)
+			if err != nil {
+				break
+			}
+
+			log.Printf("completion options: %v", opts)
+			if len(opts) == 1 {
+				input = opts[0]
+			}
+
 		default:
 			if isPrintable(k) {
 				input += string(k)

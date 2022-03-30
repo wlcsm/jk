@@ -116,13 +116,36 @@ var HLDB = []*EditorSyntax{
 	},
 	{
 		filetype:  "html",
-		filematch: []string{".html", ".htm", ".vue"},
+		filematch: []string{".html", ".htm"},
 		keywords: []string{
 			"!DOCTYPE", "html", "head", "meta", "link", "r",
 			"title", "body", "script", "div",
 		},
 		keywords2: []string{
 			"rel", "name", "content", "href", "type", "id", "charset",
+		},
+		scs:              "",
+		mcs:              "<!--",
+		mce:              "-->",
+		highlightStrings: true,
+		highlightNumbers: true,
+	},
+	{
+		filetype:         "json",
+		filematch:        []string{".json"},
+		highlightStrings: true,
+		highlightNumbers: true,
+	},
+	{
+		filetype:  "vue",
+		filematch: []string{".vue"},
+		keywords: []string{
+			"!DOCTYPE", "html", "head", "meta", "link", "r",
+			"title", "body", "script", "div",
+		},
+		keywords2: []string{
+			"rel", "name", "content", "href", "type", "id", "charset",
+			"import", "from", "template",
 		},
 		scs:              "",
 		mcs:              "<!--",

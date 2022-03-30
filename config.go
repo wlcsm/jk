@@ -113,7 +113,7 @@ var basicMapping = map[Key]func(e SDK) error{
 	},
 	// Open a new file
 	Key(ctrl('e')): func(e SDK) error {
-		filename, err := e.StaticPrompt("File name: ")
+		filename, err := e.StaticPrompt("File name: ", FileCompletion)
 		if errors.Is(err, ErrPromptCanceled) {
 			return nil
 		}
@@ -147,8 +147,22 @@ var basicMapping = map[Key]func(e SDK) error{
 		e.DeleteUntil(e.BackWord())
 		return nil
 	},
+	Key(ctrl('w')): func(e SDK) error {
+		e.DeleteUntil(e.BackWord())
+		return nil
+	},
 	Key(ctrl('r')): func(e SDK) error {
 		return RestartEditor
+	},
+	Key(ctrl('u')): func(e SDK) error {
+		e.SetPosY(e.CY() - (e.Rows() / 2))
+		e.CenterCursor()
+		return nil
+	},
+	Key(ctrl('d')): func(e SDK) error {
+		e.SetPosY(e.CY() + (e.Rows() / 2))
+		e.CenterCursor()
+		return nil
 	},
 }
 

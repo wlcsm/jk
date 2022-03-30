@@ -9,16 +9,23 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/pkg/errors"
 	"golang.org/x/term"
+)
+
+var (
+	LogFile   = "/home/wlcsm/go/src/github.com/mini/mini.log"
+	CacheFile = "/home/wlcsm/go/src/github.com/mini/cache.json"
 )
 
 var ErrQuitEditor = errors.New("quit editor")
@@ -73,21 +80,6 @@ type DisplayConfig struct {
 
 var defaultDisplayConfig = DisplayConfig{
 	Tabstop: 8,
-}
-
-func (e *Editor) Init() error {
-	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
-	if err != nil {
-		return err
-	}
-
-	// make room for status-bar and message-bar
-	e.screenRows = rows - 2
-	e.screenCols = cols
-
-	e.cfg = defaultDisplayConfig
-	e.Mode = CommandMode
-	return nil
 }
 
 type Key int32
@@ -149,7 +141,6 @@ var escapeCodeToKey = map[string]Key{
 func readKey() (Key, error) {
 	buf := make([]byte, 4)
 	for {
-		log.Printf("surprise log")
 		n, err := os.Stdin.Read(buf)
 		if err != nil && err != io.EOF {
 			return 0, err
@@ -197,12 +188,7 @@ const (
 
 // ProcessKey processes a key read from stdin.
 // Returns errQuitEditor when user requests to quit.
-func (e *Editor) ProcessKey() error {
-	k, err := readKey()
-	if err != nil {
-		return err
-	}
-
+func (e *Editor) ProcessKey(k Key) error {
 	for _, keymap := range Keymapping {
 		log.Printf("just pressed: %s", string(k))
 
@@ -278,8 +264,11 @@ func (e *Editor) drawRow(w io.Writer, y int) {
 		hl = hl[:utf8.RuneCountInString(line)]
 	}
 
+	// log.Printf("rendering: %s", line)
 	currentColor := -1 // keep track of color to detect color change
-	for i, r := range line {
+
+	i := 0
+	for _, r := range line {
 		if unicode.IsControl(r) {
 			// deal with non-printable characters (e.g. Ctrl-A)
 			sym := '?'
@@ -303,6 +292,7 @@ func (e *Editor) drawRow(w io.Writer, y int) {
 
 			w.Write(rToB(r))
 		}
+		i++
 	}
 
 	setColor(w, ClearColor)
@@ -443,7 +433,7 @@ func isArrowKey(k Key) bool {
 
 func (e *Editor) Save() error {
 	if len(e.filename) == 0 {
-		filename, err := e.StaticPrompt("Save as: %s (ESC to cancel)")
+		filename, err := e.StaticPrompt("Save as: ", nil)
 		if err != nil {
 			return err
 		}
@@ -827,30 +817,72 @@ func Run() bool {
 		}
 	}
 
+	// Yes 10 is a random number. I'm first seeing if it has any problems
+	keyChan := make(chan Key, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		for {
+			if k, err := readKey(); err != nil {
+				errChan <- err
+			} else {
+				keyChan <- k
+			}
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+
+	signal.Notify(sigChan, syscall.SIGWINCH)
+
 	for {
 		editor.Render()
 		log.Println("hello")
-		if err := editor.ProcessKey(); err != nil {
-			if err == ErrQuitEditor {
-				break
-			}
-			if err == RestartEditor {
-				if err := editor.saveDisplay(); err != nil {
-					panic(err)
+		select {
+		case k := <-keyChan:
+			if err := editor.ProcessKey(k); err != nil {
+				if err == ErrQuitEditor {
+					return false
 				}
-				if err := editor.rebuild(); err != nil {
-					panic(err)
+				if err == RestartEditor {
+					if err := editor.saveDisplay(); err != nil {
+						panic(err)
+					}
+					if err := editor.rebuild(); err != nil {
+						panic(err)
+					}
+
+					restarted = true
+					return true
 				}
 
-				restarted = true
-				return true
+				panic(err)
 			}
+		case sig := <-sigChan:
+			log.Printf("got this signal: %s\n", sig)
 
-			panic(err)
+			if sig == syscall.SIGWINCH {
+				if err := editor.setWindowSize(); err != nil {
+					errChan <- err
+				}
+			}
+		case err := <-errChan:
+			editor.SetMessage("err: %s", err)
 		}
 	}
+}
 
-	return false
+func (e *Editor) setWindowSize() error {
+	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
+	if err != nil {
+		return err
+	}
+
+	// make room for status-bar and message-bar
+	e.screenRows = rows - 2
+	e.screenCols = cols
+
+	return nil
 }
 
 var RestartEditor = fmt.Errorf("yes")
@@ -864,7 +896,6 @@ func (e *Editor) rebuild() error {
 	l, err := cmd.Output()
 	log.Printf("rebuilding returned: %s", l)
 	if err != nil {
-		log.Printf("rebuilding error: %+v", err)
 		return errors.Wrap(err, "here")
 	}
 
@@ -885,11 +916,6 @@ func (e *Editor) saveDisplay() error {
 	return os.WriteFile(CacheFile, out, 0o644)
 }
 
-var (
-	LogFile   = "/home/wlcsm/go/src/github.com/mini/mini.log"
-	CacheFile = "/home/wlcsm/go/src/github.com/mini/cache.json"
-)
-
 func enableLogs() (*os.File, error) {
 	f, err := os.OpenFile(LogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
 	if err != nil {
@@ -900,4 +926,13 @@ func enableLogs() (*os.File, error) {
 	log.Println("Logging begin")
 
 	return f, nil
+}
+
+func (e *Editor) Init() error {
+	e.setWindowSize()
+
+	e.cfg = defaultDisplayConfig
+	e.Mode = CommandMode
+
+	return nil
 }
