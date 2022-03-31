@@ -772,6 +772,22 @@ func Run() bool {
 		}
 	}
 
+	f, err := enableLogs()
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	// This ensures that when the user exits the program, the previous
+	// terminal content will be restored. Otherwise the screen will be
+	// cleared as if you executed the `clear` command.
+	//
+	// I am not using a terminfo here to decide how to switch to the
+	// alternate screen so this will probably break on interesting terminal
+	// types.
+	SwitchToAlternateScreen(os.Stdout)
+	defer SwitchBackFromAlternateScreen(os.Stdout)
+
 	restarted := false
 
 	defer func() {
@@ -785,12 +801,6 @@ func Run() bool {
 			}
 		}
 	}()
-
-	f, err := enableLogs()
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
 
 	// Set the terminal to raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -935,4 +945,12 @@ func (e *Editor) Init() error {
 	e.Mode = CommandMode
 
 	return nil
+}
+
+func SwitchToAlternateScreen(w io.Writer) {
+	w.Write([]byte("\033[?1049h"))
+}
+
+func SwitchBackFromAlternateScreen(w io.Writer) {
+	w.Write([]byte("\033[?1049l"))
 }

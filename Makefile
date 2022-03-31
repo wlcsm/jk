@@ -3,4 +3,4 @@ install:
 	# cp ./mini_raw /home/wlcsm/.local/bin/mini_raw
 	# cp ./driver.sh /home/wlcsm/.local/bin/mini
 clean:
-	rm mini
+	rm mini mini_raw
