@@ -871,7 +871,8 @@ func Run() bool {
 		case sig := <-sigChan:
 			log.Printf("got this signal: %s\n", sig)
 
-			if sig == syscall.SIGWINCH {
+			switch sig {
+			case syscall.SIGWINCH:
 				if err := editor.setWindowSize(); err != nil {
 					errChan <- err
 				}

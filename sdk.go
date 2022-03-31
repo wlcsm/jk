@@ -62,24 +62,49 @@ type SDK interface {
 	ScreenRight() int
 }
 
-type CompletionFunc func(a string) ([]string, error)
+type CompletionFunc func(a string) ([]CmplItem, error)
 
-func FileCompletion(a string) ([]string, error) {
-	files, err := os.ReadDir(".")
+type CmplItem struct {
+	Display string
+	Real    string
+}
+
+func FileCompletion(a string) ([]CmplItem, error) {
+	// Yes this will break on windows, idc
+	i := strings.LastIndex(a, "/")
+	if i == -1 {
+		i = 0
+	} else {
+		i++
+	}
+
+	fileBasename := a[:i]
+	fileHead := a[i:]
+
+	log.Printf("fileBase: %s", fileBasename)
+
+	files, err := os.ReadDir("./" + fileBasename)
 	if err != nil {
 		return nil, err
 	}
 
-	var res []string
+	var res []CmplItem
 	for _, f := range files {
-		if !strings.HasPrefix(f.Name(), a) {
+		log.Printf("fil: %s", f.Name())
+		if !strings.HasPrefix(f.Name(), fileHead) {
 			continue
 		}
 
 		if f.IsDir() {
-			res = append(res, f.Name()+"/")
+			res = append(res, CmplItem{
+				Display: f.Name() + "/",
+				Real:    fileBasename + f.Name() + "/",
+			})
 		} else if f.Type().IsRegular() {
-			res = append(res, f.Name())
+			res = append(res, CmplItem{
+				Display: f.Name(),
+				Real:    fileBasename + f.Name(),
+			})
 		}
 	}
 
@@ -500,12 +525,11 @@ func (e *Editor) StaticPrompt(prompt string, comp CompletionFunc) (input string,
 				input = input[:len(input)-1]
 			}
 		case Key('\t'):
-			log.Println("try completion")
-
 			if comp == nil {
 				break
 			}
 
+			log.Println("try completion")
 			opts, err := comp(input)
 			if err != nil {
 				break
@@ -513,7 +537,7 @@ func (e *Editor) StaticPrompt(prompt string, comp CompletionFunc) (input string,
 
 			log.Printf("completion options: %v", opts)
 			if len(opts) == 1 {
-				input = opts[0]
+				input = opts[0].Real
 			}
 
 		default:
