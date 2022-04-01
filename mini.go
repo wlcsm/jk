@@ -35,6 +35,7 @@ type EditorMode int8
 const (
 	InsertMode EditorMode = iota + 1
 	CommandMode
+	PromptMode
 )
 
 type Editor struct {
@@ -141,20 +142,26 @@ var escapeCodeToKey = map[string]Key{
 func readKey() (Key, error) {
 	buf := make([]byte, 4)
 	for {
+		log.Printf("here now %s", debug.Stack())
 		n, err := os.Stdin.Read(buf)
+		log.Printf("just read: %s", string(buf))
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
 
+		log.Printf("noe hh")
 		if n == 0 {
 			continue
 		}
 
+		log.Printf("noe eee")
 		buf = bytes.TrimRightFunc(buf, func(r rune) bool { return r == 0 })
 		key, ok := escapeCodeToKey[string(buf)]
 		if !ok {
 			return Key(buf[0]), nil
 		}
+
+		log.Printf("final")
 
 		return key, nil
 	}
@@ -190,7 +197,7 @@ const (
 // Returns errQuitEditor when user requests to quit.
 func (e *Editor) ProcessKey(k Key) error {
 	for _, keymap := range Keymapping {
-		log.Printf("just pressed: %s", string(k))
+		log.Printf("processing key from main func: %s", string(k))
 
 		handled, err := keymap.Handler(e, k)
 		if err != nil {
@@ -432,15 +439,19 @@ func isArrowKey(k Key) bool {
 }
 
 func (e *Editor) Save() error {
-	if len(e.filename) == 0 {
-		filename, err := e.StaticPrompt("Save as: ", nil)
-		if err != nil {
-			return err
-		}
-
-		e.filename = filename
+	if len(e.filename) != 0 {
+		return e.saveFile(e.filename)
 	}
 
+	e.StaticPrompt("Save as: ", func(filename string) error {
+		e.filename = filename
+		return e.saveFile(filename)
+	}, nil)
+
+	return nil
+}
+
+func (e *Editor) saveFile(filename string) error {
 	f, err := os.OpenFile(e.filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -836,6 +847,7 @@ func Run() bool {
 			if k, err := readKey(); err != nil {
 				errChan <- err
 			} else {
+				log.Printf("Sending key to chan: %s", string(k))
 				keyChan <- k
 			}
 		}
@@ -850,6 +862,7 @@ func Run() bool {
 		log.Println("hello")
 		select {
 		case k := <-keyChan:
+			log.Printf("received key: %s", string(k))
 			if err := editor.ProcessKey(k); err != nil {
 				if err == ErrQuitEditor {
 					return false

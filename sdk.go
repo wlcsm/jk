@@ -17,9 +17,10 @@ type SDK interface {
 	InsertNewline()
 	IsModified() bool
 
+	ErrChan() chan<- error
 	OpenFile(f string) error
-	Prompt(prompt string, cb func(k Key) (string, bool)) error
-	StaticPrompt(prompt string, cmpl CompletionFunc) (string, error)
+	Prompt(prompt string, cb func(Key) (string, bool))
+	StaticPrompt(prompt string, end func(string) error, cmpl CompletionFunc)
 	Save() error
 	SetMessage(format string, args ...interface{})
 	Filename() string
@@ -27,9 +28,9 @@ type SDK interface {
 	// Delete until the rune
 	DeleteUntil(i int)
 	// Search to the left until the predicate matches
-	FindLeft(x, y int, f func(s rune) bool) (int, bool)
+	FindLeft(x, y int, f func(rune) bool) (int, bool)
 	// Search to the left until the predicate matches
-	FindRight(func(r rune) bool) (int, bool)
+	FindRight(func(rune) bool) (int, bool)
 
 	// Set the absolute position of the cursor's y (wrapped)
 	SetPosY(y int)
@@ -231,27 +232,30 @@ func (e *Editor) DeleteRow(at int) {
 //
 // The mandatory callback is called with the user's input and returns the full
 // text to display and a boolean indicating whether the promt should finish
-func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) error {
+func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) {
 	if cb == nil {
-		return fmt.Errorf("Can't give a nil function to Prompt")
+		e.ErrChan() <- fmt.Errorf("can't give a nil function to Prompt")
+		return
 	}
 
-	var finished bool
+	backup := Keymapping
+	SetKeymapping([]KeyMap{{
+		Name: PromptModeName,
+		Handler: func(e SDK, k Key) (bool, error) {
+			s, finished := cb(k)
+			e.SetMessage(prompt + s)
 
-	for !finished {
-		e.SetMessage(prompt)
-		e.Render()
+			// Restore the previous keymapping when finished
+			if finished {
+				SetKeymapping(backup)
+			}
 
-		k, err := readKey()
-		if err != nil {
-			return err
-		}
+			return finished, nil
+		},
+	}})
 
-		prompt, finished = cb(k)
-	}
-
-	e.SetMessage("")
-	return nil
+	e.SetMode(PromptMode)
+	e.SetMessage(prompt)
 }
 
 /*** find ***/
@@ -311,7 +315,8 @@ func (e *Editor) Find() error {
 		return "Search: " + string(query), false
 	}
 
-	err := e.Prompt("Search: ", onKeyPress)
+	// TODO come back here
+	e.Prompt("Search: ", onKeyPress)
 
 	// Get rid of the search highlight
 	e.updateRow(e.cy)
@@ -324,7 +329,7 @@ func (e *Editor) Find() error {
 		e.rowOffset = savedRowOffset
 	}
 
-	return err
+	return nil
 }
 
 func (e *Editor) SetRowOffset(y int) {
@@ -508,17 +513,25 @@ func (e *Editor) SetMode(m EditorMode) {
 	}
 }
 
+func (e *Editor) ErrChan() chan<- error {
+	return e.errChan
+}
+
 // StaticPrompt is a "normal" prompt designed to only get input from the user.
 // It you want things to happen when you press any key, then use Prompt
-func (e *Editor) StaticPrompt(prompt string, comp CompletionFunc) (input string, err error) {
-	canceled := false
-	err = e.Prompt(prompt, func(k Key) (string, bool) {
+func (e *Editor) StaticPrompt(prompt string, end func(string) error, comp CompletionFunc) {
+	var input string
+
+	e.Prompt(prompt, func(k Key) (string, bool) {
 		log.Printf("key is: %s", string(k))
+
 		switch k {
 		case keyEnter, keyCarriageReturn:
-			return "", true
+			if err := end(input); err != nil {
+				e.ErrChan() <- err
+			}
+			return input, true
 		case keyEscape, Key(ctrl('q')):
-			canceled = true
 			return "", true
 		case keyBackspace, keyDelete:
 			if len(input) > 0 {
@@ -546,17 +559,6 @@ func (e *Editor) StaticPrompt(prompt string, comp CompletionFunc) (input string,
 			}
 		}
 
-		return prompt + input, false
+		return input, false
 	})
-	e.SetMessage("")
-
-	if err != nil {
-		return "", err
-	}
-
-	if canceled {
-		return input, ErrPromptCanceled
-	}
-
-	return input, nil
 }

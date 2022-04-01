@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 
 	"github.com/mattn/go-runewidth"
-	"github.com/pkg/errors"
 )
 
 const Version = "dev"
@@ -23,6 +21,10 @@ var Keymapping = []KeyMap{
 	CommandModeMap,
 }
 
+func SetKeymapping(k []KeyMap) {
+	Keymapping = k
+}
+
 var KeyModes = map[KeyMapName]KeyMap{
 	BasicMapName:    BasicMap,
 	InsertModeName:  InsertModeMap,
@@ -35,6 +37,7 @@ const (
 	BasicMapName KeyMapName = iota + 1
 	InsertModeName
 	CommandModeName
+	PromptModeName
 )
 
 var BasicMap = KeyMap{
@@ -113,24 +116,15 @@ var basicMapping = map[Key]func(e SDK) error{
 	},
 	// Open a new file
 	Key(ctrl('e')): func(e SDK) error {
-		filename, err := e.StaticPrompt("File name: ", FileCompletion)
-		if errors.Is(err, ErrPromptCanceled) {
-			return nil
-		}
+		e.StaticPrompt("File name: ", func(res string) error {
+			if len(res) == 0 {
+				return fmt.Errorf("No file name")
+			}
 
-		if err != nil {
-			return err
-		}
+			return e.OpenFile(res)
+		}, FileCompletion)
 
-		if len(filename) == 0 {
-			return fmt.Errorf("No file name")
-		}
-
-		if err = e.OpenFile(filename); errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("File doesn't exist")
-		}
-
-		return err
+		return nil
 	},
 	Key(ctrl('f')): func(e SDK) error {
 		err := e.Find()
