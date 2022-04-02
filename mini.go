@@ -195,9 +195,15 @@ const (
 
 // ProcessKey processes a key read from stdin.
 // Returns errQuitEditor when user requests to quit.
-func (e *Editor) ProcessKey(k Key) error {
+func (e *Editor) ProcessKey(k Key) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = errors.Wrap(e.(error), "panicked")
+		}
+	}()
+
 	for _, keymap := range Keymapping {
-		log.Printf("processing key from main func: %s", string(k))
+		log.Printf("processing key: %s, with keymap: %s", string(k), keymap.Name)
 
 		handled, err := keymap.Handler(e, k)
 		if err != nil {
@@ -840,12 +846,12 @@ func Run() bool {
 
 	// Yes 10 is a random number. I'm first seeing if it has any problems
 	keyChan := make(chan Key, 1)
-	errChan := make(chan error, 1)
+	editor.errChan = make(chan error, 1)
 
 	go func() {
 		for {
 			if k, err := readKey(); err != nil {
-				errChan <- err
+				editor.errChan <- err
 			} else {
 				log.Printf("Sending key to chan: %s", string(k))
 				keyChan <- k
@@ -863,34 +869,37 @@ func Run() bool {
 		select {
 		case k := <-keyChan:
 			log.Printf("received key: %s", string(k))
+
 			if err := editor.ProcessKey(k); err != nil {
-				if err == ErrQuitEditor {
-					return false
-				}
-				if err == RestartEditor {
-					if err := editor.saveDisplay(); err != nil {
-						panic(err)
-					}
-					if err := editor.rebuild(); err != nil {
-						panic(err)
-					}
-
-					restarted = true
-					return true
-				}
-
-				panic(err)
+				editor.errChan <- err
 			}
 		case sig := <-sigChan:
-			log.Printf("got this signal: %s\n", sig)
+			log.Printf("received signal: %s", sig)
 
 			switch sig {
 			case syscall.SIGWINCH:
 				if err := editor.setWindowSize(); err != nil {
-					errChan <- err
+					editor.errChan <- err
 				}
 			}
-		case err := <-errChan:
+		case err := <-editor.errChan:
+			log.Printf("received error: %s", err)
+
+			switch err {
+			case ErrQuitEditor:
+				return false
+			case RestartEditor:
+				if err = editor.saveDisplay(); err != nil {
+					break
+				}
+				if err = editor.rebuild(); err != nil {
+					break
+				}
+
+				restarted = true
+				return true
+			}
+
 			editor.SetMessage("err: %s", err)
 		}
 	}

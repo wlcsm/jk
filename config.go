@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"unicode"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -31,13 +32,13 @@ var KeyModes = map[KeyMapName]KeyMap{
 	CommandModeName: CommandModeMap,
 }
 
-type KeyMapName int
+type KeyMapName string
 
 const (
-	BasicMapName KeyMapName = iota + 1
-	InsertModeName
-	CommandModeName
-	PromptModeName
+	BasicMapName    KeyMapName = "Basic"
+	InsertModeName  KeyMapName = "Insert"
+	CommandModeName KeyMapName = "Command"
+	PromptModeName  KeyMapName = "Prompt"
 )
 
 var BasicMap = KeyMap{
@@ -55,7 +56,13 @@ func basicHandler(e SDK, k Key) (bool, error) {
 
 var basicMapping = map[Key]func(e SDK) error{
 	keyBackspace: func(e SDK) error {
-		e.DeleteChar()
+		x := e.CX()
+		if x != 0 {
+			e.Delete(e.CY(), x-1, x-1)
+		}
+
+		e.SetPosX(x - 1)
+
 		return nil
 	},
 	keyPageUp: func(e SDK) error {
@@ -84,25 +91,23 @@ var basicMapping = map[Key]func(e SDK) error{
 	},
 	Key(ctrl('q')): func(e SDK) error {
 		if e.IsModified() {
-			var quit bool
-
 			e.Prompt("WARNING!!! File has unsaved changes. Press Ctrl-Q again to quit.",
 				func(k Key) (string, bool) {
+					log.Printf("im here now")
 					if k == Key(ctrl('q')) {
-						quit = true
+						e.ErrChan() <- ErrQuitEditor
 					}
 
 					return "", true
 				})
 
-			if !quit {
-				return nil
-			}
-		}
+			return nil
+		} else {
+			ClearScreen()
+			RepositionCursor()
 
-		ClearScreen()
-		RepositionCursor()
-		return ErrQuitEditor
+			return ErrQuitEditor
+		}
 	},
 	Key(ctrl('s')): func(e SDK) error {
 		log.Printf("attempting to save: %s\n", e.Filename())
@@ -138,11 +143,7 @@ var basicMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key(ctrl('w')): func(e SDK) error {
-		e.DeleteUntil(e.BackWord())
-		return nil
-	},
-	Key(ctrl('w')): func(e SDK) error {
-		e.DeleteUntil(e.BackWord())
+		e.Delete(e.CY(), e.BackWord(), e.CX()-1)
 		return nil
 	},
 	Key(ctrl('r')): func(e SDK) error {
@@ -262,40 +263,64 @@ var commandModeMapping = map[Key]func(e SDK) error{
 	},
 }
 
-func (e *Editor) ForwardWord() {
-	i, ok := e.FindRight(func(r rune) bool {
-		return r == ' ' || r == '\t'
-	})
-	if !ok {
-		e.SetPosX(len(e.rows[e.cy].chars))
-		return
+func (e *Editor) ForwardWord() int {
+	x, y := e.CX(), e.CY()
+	row := e.rows[y].chars
+
+	i := Find(row[x:], unicode.IsSpace)
+	if i == -1 {
+		return len(row)
 	}
 
-	e.SetPosX(i)
+	i = Find(row[i:], func(r rune) bool { return !unicode.IsSpace(r) })
+	if i == -1 {
+		return len(row)
+	}
 
-	i, _ = e.FindRight(func(r rune) bool {
-		return r != ' ' && r != '\t'
-	})
+	return i
+}
 
-	e.SetPosX(i)
+func Find(s []rune, f func(rune) bool) int {
+	for i := range s {
+		if f(s[i]) {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func FindLeft(s []rune, f func(rune) bool) int {
+	for i := len(s) - 1; i > 0; i++ {
+		if f(s[i]) {
+			return i
+		}
+	}
+
+	return -1
 }
 
 func (e *Editor) BackWord() int {
 	x, y := e.CX(), e.CY()
-	i, _ := e.FindLeft(x, y, func(r rune) bool {
-		return r == ' ' || r == '\t'
-	})
+	chars := e.rows[y].chars
+
+	i := FindLeft(chars[:x], unicode.IsSpace)
+	if i == -1 {
+		return 0
+	}
 
 	// If the cursor is already at the beginning of the word, go to
 	// the beginning of the next word
 	if i == x-1 {
-		i, _ = e.FindLeft(i, y, func(r rune) bool {
-			return r != ' ' && r != '\t'
-		})
+		i = FindLeft(chars[:x], func(r rune) bool { return !unicode.IsSpace(r) })
+		if i == -1 {
+			return 0
+		}
 
-		i, _ = e.FindLeft(i, y, func(r rune) bool {
-			return r == ' ' || r == '\t'
-		})
+		i = FindLeft(chars[:i], unicode.IsSpace)
+		if i == -1 {
+			return 0
+		}
 	}
 
 	return i

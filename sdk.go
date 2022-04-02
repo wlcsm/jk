@@ -9,11 +9,10 @@ import (
 
 type SDK interface {
 	InsertChar(c rune)
-	DeleteChar()
 	DeleteRow(at int)
 	Find() error
 	BackWord() int
-	ForwardWord()
+	ForwardWord() int
 	InsertNewline()
 	IsModified() bool
 
@@ -25,12 +24,7 @@ type SDK interface {
 	SetMessage(format string, args ...interface{})
 	Filename() string
 
-	// Delete until the rune
-	DeleteUntil(i int)
-	// Search to the left until the predicate matches
-	FindLeft(x, y int, f func(rune) bool) (int, bool)
-	// Search to the left until the predicate matches
-	FindRight(func(rune) bool) (int, bool)
+	Delete(y, x1, x2 int)
 
 	// Set the absolute position of the cursor's y (wrapped)
 	SetPosY(y int)
@@ -192,35 +186,7 @@ func (e *Editor) InsertChar(c rune) {
 	e.modified = true
 }
 
-func (e *Editor) DeleteChar() {
-	if e.cy == len(e.rows) {
-		return
-	}
-	if e.cx == 0 && e.cy == 0 {
-		return
-	}
-
-	row := e.rows[e.cy]
-	if e.cx > 0 {
-		row.deleteChar(e.cx - 1)
-		e.updateRow(e.cy)
-		e.cx--
-		e.modified = true
-	} else {
-		prevRow := e.rows[e.cy-1]
-		e.cx = len(prevRow.chars)
-		prevRow.appendChars(row.chars)
-		e.DeleteRow(e.cy)
-		e.updateHighlight(e.cy)
-		e.cy--
-	}
-}
-
 func (e *Editor) DeleteRow(at int) {
-	if at < 0 || len(e.rows) <= at {
-		return
-	}
-
 	e.rows = append(e.rows[:at], e.rows[at+1:]...)
 
 	e.modified = true
@@ -365,10 +331,6 @@ outer:
 }
 
 func (e *Editor) SetRow(at int, chars string) {
-	if at < 0 || at > len(e.rows) {
-		return
-	}
-
 	e.rows[at].chars = []rune(chars)
 	e.updateRow(at)
 
@@ -379,10 +341,6 @@ func (e *Editor) SetRow(at int, chars string) {
 }
 
 func (e *Editor) InsertRow(at int, chars string) {
-	if at < 0 || at > len(e.rows) {
-		return
-	}
-
 	row := &Row{chars: []rune(chars)}
 	if at > 0 {
 		row.hasUnclosedComment = e.rows[at-1].hasUnclosedComment
@@ -401,38 +359,12 @@ func (e *Editor) InsertRow(at int, chars string) {
 	}
 }
 
-func (e *Editor) DeleteUntil(x int) {
-	row := e.rows[e.cy]
-	row.chars = append(row.chars[:x], row.chars[e.cx:]...)
-	e.cx = x
-
-	e.updateRow(e.cy)
-}
-
-func (e *Editor) FindLeft(x, y int, f func(s rune) bool) (int, bool) {
-	row := e.rows[y]
-
-	// Find the first instance of the rune starting at the cursor
-	for i := x - 1; i >= 0; i-- {
-		if f(row.chars[i]) {
-			return i, true
-		}
-	}
-
-	return 0, false
-}
-
-func (e *Editor) FindRight(f func(s rune) bool) (int, bool) {
-	row := e.rows[e.cy]
-
-	// Find the first instance of the rune starting at the cursor
-	for i := e.cx; i < len(row.chars); i++ {
-		if f(row.chars[i]) {
-			return i, true
-		}
-	}
-
-	return len(row.chars), false
+func (e *Editor) Delete(y, x1, x2 int) {
+	log.Printf("y: %d, x1: %d, x2: %d", y, x1, x2)
+	row := e.rows[y].chars
+	e.rows[y].chars = append(row[:x1], row[x2+1:]...)
+	log.Printf("row: %s", string(e.rows[y].chars))
+	e.updateRow(y)
 }
 
 func (e *Editor) SetPosY(y int) {
@@ -530,6 +462,7 @@ func (e *Editor) StaticPrompt(prompt string, end func(string) error, comp Comple
 			if err := end(input); err != nil {
 				e.ErrChan() <- err
 			}
+
 			return input, true
 		case keyEscape, Key(ctrl('q')):
 			return "", true
@@ -542,17 +475,15 @@ func (e *Editor) StaticPrompt(prompt string, end func(string) error, comp Comple
 				break
 			}
 
-			log.Println("try completion")
 			opts, err := comp(input)
 			if err != nil {
 				break
 			}
-
 			log.Printf("completion options: %v", opts)
+
 			if len(opts) == 1 {
 				input = opts[0].Real
 			}
-
 		default:
 			if isPrintable(k) {
 				input += string(k)
