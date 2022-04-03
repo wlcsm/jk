@@ -142,26 +142,20 @@ var escapeCodeToKey = map[string]Key{
 func readKey() (Key, error) {
 	buf := make([]byte, 4)
 	for {
-		log.Printf("here now %s", debug.Stack())
 		n, err := os.Stdin.Read(buf)
-		log.Printf("just read: %s", string(buf))
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
 
-		log.Printf("noe hh")
 		if n == 0 {
 			continue
 		}
 
-		log.Printf("noe eee")
 		buf = bytes.TrimRightFunc(buf, func(r rune) bool { return r == 0 })
 		key, ok := escapeCodeToKey[string(buf)]
 		if !ok {
 			return Key(buf[0]), nil
 		}
-
-		log.Printf("final")
 
 		return key, nil
 	}
@@ -545,23 +539,6 @@ func (e *Editor) OpenFile(filename string) error {
 	return nil
 }
 
-func (e *Editor) InsertNewline() {
-	if e.cx == 0 {
-		e.InsertRow(e.cy, "")
-	} else {
-		row := e.rows[e.cy]
-		e.InsertRow(e.cy+1, string(row.chars[e.cx:]))
-		// reassignment needed since the call to InsertRow
-		// invalidates the pointer.
-		row = e.rows[e.cy]
-		row.chars = row.chars[:e.cx]
-		e.updateRow(e.cy)
-	}
-
-	e.cy++
-	e.cx = 0
-}
-
 func (e *Editor) updateRow(y int) {
 	var b strings.Builder
 	row := e.rows[y]
@@ -576,6 +553,7 @@ func (e *Editor) updateRow(y int) {
 		// each tab must advance the cursor forward at least one column
 		b.WriteRune(' ')
 		cols++
+
 		// append spaces until we get to a tab stop
 		for cols%e.cfg.Tabstop != 0 {
 			b.WriteRune(' ')
@@ -772,10 +750,16 @@ type DisplaySettings struct {
 }
 
 func Run() bool {
-	var cfg DisplaySettings
+	var (
+		cfg DisplaySettings
+		// Whether the program has been restarted. This is used prevent the screen from unecessarily redrawing
+		restartMode bool
+	)
+
 	argIndex := 1
 	if len(os.Args) == 3 {
 		if os.Args[1] == "-z" {
+			restartMode = true
 			out, err := os.ReadFile(CacheFile)
 			if err != nil {
 				panic(err)
@@ -802,13 +786,16 @@ func Run() bool {
 	// I am not using a terminfo here to decide how to switch to the
 	// alternate screen so this will probably break on interesting terminal
 	// types.
-	SwitchToAlternateScreen(os.Stdout)
-	defer SwitchBackFromAlternateScreen(os.Stdout)
+	if !restartMode {
+		SwitchToAlternateScreen(os.Stdout)
+	}
 
 	restarted := false
 
 	defer func() {
 		if !restarted {
+			SwitchBackFromAlternateScreen(os.Stdout)
+
 			os.Stdout.WriteString(ClearScreenCode)
 			os.Stdout.WriteString(RepositionCursorCode)
 			if err := recover(); err != nil {
@@ -853,7 +840,6 @@ func Run() bool {
 			if k, err := readKey(); err != nil {
 				editor.errChan <- err
 			} else {
-				log.Printf("Sending key to chan: %s", string(k))
 				keyChan <- k
 			}
 		}
@@ -863,9 +849,13 @@ func Run() bool {
 
 	signal.Notify(sigChan, syscall.SIGWINCH)
 
+	if restartMode {
+		editor.SetMessage("Restarted")
+	}
+
 	for {
 		editor.Render()
-		log.Println("hello")
+
 		select {
 		case k := <-keyChan:
 			log.Printf("received key: %s", string(k))
@@ -883,7 +873,7 @@ func Run() bool {
 				}
 			}
 		case err := <-editor.errChan:
-			log.Printf("received error: %s", err)
+			log.Printf("received error: %+v", err)
 
 			switch err {
 			case ErrQuitEditor:
@@ -976,4 +966,49 @@ func SwitchToAlternateScreen(w io.Writer) {
 
 func SwitchBackFromAlternateScreen(w io.Writer) {
 	w.Write([]byte("\033[?1049l"))
+}
+
+func (e *Editor) drawStatusBar(b io.Writer) {
+	setColor(b, InvertedColor)
+	defer clearFormatting(b)
+
+	filename := e.filename
+	if len(filename) == 0 {
+		filename = "[No Name]"
+	}
+
+	dirtyStatus := ""
+	if e.modified {
+		dirtyStatus = "(modified)"
+	}
+
+	mode := ""
+	switch e.Mode {
+	case InsertMode:
+		mode = "-- INSERT MODE --"
+	case CommandMode:
+		mode = "-- COMMAND MODE --"
+	}
+
+	lmsg := fmt.Sprintf("%.20s - %d lines %s %s", filename, len(e.rows), dirtyStatus, mode)
+	if runewidth.StringWidth(lmsg) > e.screenCols {
+		lmsg = runewidth.Truncate(lmsg, e.screenCols, "...")
+	}
+	b.Write([]byte(lmsg))
+
+	filetype := "no filetype"
+	if e.syntax != nil {
+		filetype = e.syntax.filetype
+	}
+	rmsg := fmt.Sprintf("%s | %d/%d", filetype, e.cy+1, len(e.rows))
+
+	// Add padding between the left and right message
+	l := runewidth.StringWidth(lmsg)
+	r := runewidth.StringWidth(rmsg)
+	for i := 0; i < e.screenCols-l-r; i++ {
+		b.Write([]byte{' '})
+	}
+
+	b.Write([]byte(rmsg))
+	b.Write([]byte("\r\n"))
 }

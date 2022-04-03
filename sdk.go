@@ -5,15 +5,17 @@ import (
 	"log"
 	"os"
 	"strings"
+	"unicode"
 )
 
 type SDK interface {
-	InsertChar(c rune)
+	InsertChars(y, x int, c ...rune)
 	DeleteRow(at int)
 	Find() error
+
+	Word() int
 	BackWord() int
-	ForwardWord() int
-	InsertNewline()
+
 	IsModified() bool
 
 	ErrChan() chan<- error
@@ -41,7 +43,7 @@ type SDK interface {
 	SetMode(m EditorMode)
 
 	SetRow(at int, chars string)
-	InsertRow(at int, chars string)
+	InsertRow(at int, chars []rune)
 
 	CX() int
 	CY() int
@@ -106,6 +108,69 @@ func FileCompletion(a string) ([]CmplItem, error) {
 	return res, nil
 }
 
+func Find(s []rune, f func(rune) bool) int {
+	for i := range s {
+		if f(s[i]) {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func FindLeft(s []rune, f func(rune) bool) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if f(s[i]) {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func (e *Editor) Word() int {
+	x, y := e.CX(), e.CY()
+	row := e.rows[y].chars
+
+	i := Find(row[x:], unicode.IsSpace)
+	if i == -1 {
+		return len(row)
+	}
+
+	j := Find(row[x+i:], func(r rune) bool { return !unicode.IsSpace(r) })
+	if j == -1 {
+		return len(row)
+	}
+
+	return x + i + j
+}
+
+func (e *Editor) BackWord() int {
+	x, y := e.CX(), e.CY()
+	chars := e.rows[y].chars
+
+	i := FindLeft(chars[:x], unicode.IsSpace)
+	if i == -1 {
+		return 0
+	}
+
+	// If the cursor is already at the beginning of the word, go to
+	// the beginning of the next word
+	if i == x-1 {
+		i = FindLeft(chars[:x], func(r rune) bool { return !unicode.IsSpace(r) })
+		if i == -1 {
+			return 0
+		}
+
+		i = FindLeft(chars[:i], unicode.IsSpace)
+		if i == -1 {
+			return 0
+		}
+	}
+
+	return i + 1
+}
+
 func (e *Editor) CenterCursor() {
 	e.rowOffset = e.cy - (e.screenRows / 2)
 	if e.rowOffset < 0 {
@@ -154,44 +219,27 @@ func (e *Editor) ScreenRight() int {
 }
 
 func (row *Row) insertChar(at int, c rune) {
-	if at < 0 || at > len(row.chars) {
-		at = len(row.chars)
-	}
-
-	row.chars = append(row.chars, 0) // make room
-	copy(row.chars[at+1:], row.chars[at:])
-	row.chars[at] = c
 }
 
-func (row *Row) appendChars(chars []rune) {
-	row.chars = append(row.chars, chars...)
-}
-
-func (row *Row) deleteChar(at int) {
-	if at < 0 || at >= len(row.chars) {
-		return
-	}
-	row.chars = append(row.chars[:at], row.chars[at+1:]...)
-}
-
-func (e *Editor) InsertChar(c rune) {
+func (e *Editor) InsertChars(y, x int, chars ...rune) {
 	if e.cy == len(e.rows) {
-		e.InsertRow(len(e.rows), "")
+		e.InsertRow(len(e.rows), []rune(""))
 	}
 
 	row := e.rows[e.cy]
-	row.insertChar(e.cx, c)
+
+	// make some room for the new chars
+	row.chars = append(row.chars, make([]rune, len(chars))...)
+
+	// shift the existing data back, and insert the chars in between
+	copy(row.chars[x+len(chars):], row.chars[x:])
+	copy(row.chars[x:], chars)
+
 	e.updateRow(e.cy)
-	e.cx++
-	e.modified = true
 }
 
 func (e *Editor) DeleteRow(at int) {
 	e.rows = append(e.rows[:at], e.rows[at+1:]...)
-
-	e.modified = true
-	e.WrapCursorY()
-	e.WrapCursorX()
 }
 
 // Prompt shows the given prompt in the status bar and get user input
@@ -340,8 +388,8 @@ func (e *Editor) SetRow(at int, chars string) {
 	}
 }
 
-func (e *Editor) InsertRow(at int, chars string) {
-	row := &Row{chars: []rune(chars)}
+func (e *Editor) InsertRow(at int, chars []rune) {
+	row := Row{chars: chars}
 	if at > 0 {
 		row.hasUnclosedComment = e.rows[at-1].hasUnclosedComment
 	}
@@ -349,14 +397,9 @@ func (e *Editor) InsertRow(at int, chars string) {
 	// grow the buffer
 	e.rows = append(e.rows, &Row{})
 	copy(e.rows[at+1:], e.rows[at:])
-	e.rows[at] = row
+	e.rows[at] = &row
 
 	e.updateRow(at)
-
-	// adjust the cursor
-	if at < e.cy {
-		e.cy++
-	}
 }
 
 func (e *Editor) Delete(y, x1, x2 int) {

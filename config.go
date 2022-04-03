@@ -2,11 +2,7 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
-	"unicode"
-
-	"github.com/mattn/go-runewidth"
 )
 
 const Version = "dev"
@@ -172,18 +168,18 @@ func insertModeHandler(e SDK, k Key) (bool, error) {
 		return true, err
 	}
 
-	e.InsertChar(rune(k))
+	e.InsertChars(e.CY(), e.CX(), rune(k))
 
 	return true, nil
 }
 
 var insertModeMapping = map[Key]func(e SDK) error{
 	keyEnter: func(e SDK) error {
-		e.InsertNewline()
+		e.InsertRow(e.CX(), []rune(""))
 		return nil
 	},
 	keyCarriageReturn: func(e SDK) error {
-		e.InsertNewline()
+		e.InsertRow(e.CX(), []rune(""))
 		return nil
 	},
 	Key(ctrl('c')): func(e SDK) error {
@@ -228,7 +224,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('o'): func(e SDK) error {
-		e.InsertRow(e.CY()+1, "")
+		e.InsertRow(e.CY()+1, []rune(""))
 		e.SetPosY(e.CY() + 1)
 		e.SetMode(InsertMode)
 		return nil
@@ -254,119 +250,12 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('w'): func(e SDK) error {
-		e.ForwardWord()
+		e.SetPosX(e.Word())
 		return nil
 	},
 	Key('b'): func(e SDK) error {
+		log.Printf("back position: %d, curr pos: %d", e.BackWord(), e.CX())
 		e.SetPosX(e.BackWord())
 		return nil
 	},
-}
-
-func (e *Editor) ForwardWord() int {
-	x, y := e.CX(), e.CY()
-	row := e.rows[y].chars
-
-	i := Find(row[x:], unicode.IsSpace)
-	if i == -1 {
-		return len(row)
-	}
-
-	i = Find(row[i:], func(r rune) bool { return !unicode.IsSpace(r) })
-	if i == -1 {
-		return len(row)
-	}
-
-	return i
-}
-
-func Find(s []rune, f func(rune) bool) int {
-	for i := range s {
-		if f(s[i]) {
-			return i
-		}
-	}
-
-	return -1
-}
-
-func FindLeft(s []rune, f func(rune) bool) int {
-	for i := len(s) - 1; i > 0; i++ {
-		if f(s[i]) {
-			return i
-		}
-	}
-
-	return -1
-}
-
-func (e *Editor) BackWord() int {
-	x, y := e.CX(), e.CY()
-	chars := e.rows[y].chars
-
-	i := FindLeft(chars[:x], unicode.IsSpace)
-	if i == -1 {
-		return 0
-	}
-
-	// If the cursor is already at the beginning of the word, go to
-	// the beginning of the next word
-	if i == x-1 {
-		i = FindLeft(chars[:x], func(r rune) bool { return !unicode.IsSpace(r) })
-		if i == -1 {
-			return 0
-		}
-
-		i = FindLeft(chars[:i], unicode.IsSpace)
-		if i == -1 {
-			return 0
-		}
-	}
-
-	return i
-}
-
-func (e *Editor) drawStatusBar(b io.Writer) {
-	setColor(b, InvertedColor)
-	defer clearFormatting(b)
-
-	filename := e.filename
-	if len(filename) == 0 {
-		filename = "[No Name]"
-	}
-
-	dirtyStatus := ""
-	if e.modified {
-		dirtyStatus = "(modified)"
-	}
-
-	mode := ""
-	switch e.Mode {
-	case InsertMode:
-		mode = "-- INSERT MODE --"
-	case CommandMode:
-		mode = "-- COMMAND MODE --"
-	}
-
-	lmsg := fmt.Sprintf("%.20s - %d lines %s %s", filename, len(e.rows), dirtyStatus, mode)
-	if runewidth.StringWidth(lmsg) > e.screenCols {
-		lmsg = runewidth.Truncate(lmsg, e.screenCols, "...")
-	}
-	b.Write([]byte(lmsg))
-
-	filetype := "no filetype"
-	if e.syntax != nil {
-		filetype = e.syntax.filetype
-	}
-	rmsg := fmt.Sprintf("%s | %d/%d", filetype, e.cy+1, len(e.rows))
-
-	// Add padding between the left and right message
-	l := runewidth.StringWidth(lmsg)
-	r := runewidth.StringWidth(rmsg)
-	for i := 0; i < e.screenCols-l-r; i++ {
-		b.Write([]byte{' '})
-	}
-
-	b.Write([]byte(rmsg))
-	b.Write([]byte("\r\n"))
 }
