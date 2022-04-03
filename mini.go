@@ -73,6 +73,9 @@ type Editor struct {
 
 	// specify which syntax highlight to use.
 	syntax *EditorSyntax
+
+	// Last search query
+	lastSearch []rune
 }
 
 type DisplayConfig struct {

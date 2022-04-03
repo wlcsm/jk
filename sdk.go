@@ -11,7 +11,10 @@ import (
 type SDK interface {
 	InsertChars(y, x int, c ...rune)
 	DeleteRow(at int)
-	Find()
+	FindInteractive()
+	Find(x, y int, query []rune) (x1, y1 int)
+
+	LastSearch() []rune
 
 	Word() int
 	BackWord() int
@@ -273,7 +276,11 @@ func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) {
 	e.SetMessage(prompt)
 }
 
-func (e *Editor) Find() {
+func (e *Editor) LastSearch() []rune {
+	return e.lastSearch
+}
+
+func (e *Editor) FindInteractive() {
 	savedCx := e.cx
 	savedCy := e.cy
 	savedColOffset := e.colOffset
@@ -286,6 +293,15 @@ func (e *Editor) Find() {
 		case keyDelete, keyBackspace:
 			if len(query) != 0 {
 				query = query[:len(query)-1]
+
+				// This forces the editor to search again to
+				// see if the current word is indeed the
+				// closest match. Yes making a stack containing
+				// the previous matches would be better, but it
+				// is somewhat unecessary at the moment
+				e.cx = savedCx
+				e.cy = savedCy
+
 			}
 		case keyEscape, Key(ctrl('q')):
 			// restore cursor position when the user cancels search
@@ -299,6 +315,8 @@ func (e *Editor) Find() {
 			return "", true
 		case keyEnter, keyCarriageReturn:
 			e.SetMessage("")
+			e.lastSearch = query
+
 			return "", true
 		default:
 			if isPrintable(k) {
@@ -306,7 +324,7 @@ func (e *Editor) Find() {
 			}
 		}
 
-		x, y := e.find(e.CY(), query)
+		x, y := e.Find(e.cx, e.cy, query)
 		if x == -1 {
 			e.cx = savedCx
 			e.cy = savedCy
@@ -329,15 +347,18 @@ func (e *Editor) Find() {
 	e.Prompt("Search: ", onKeyPress)
 }
 
-func (e *Editor) find(yOrig int, query []rune) (x, y int) {
-	// The real search
-	for y = yOrig; y < len(e.rows); y++ {
-		x = findSubstring(e.rows[y].chars, query)
-		if x == -1 {
-			continue
-		}
+func (e *Editor) Find(x1, y1 int, query []rune) (x, y int) {
+	x = findSubstring(e.rows[y1].chars[x1:], query)
+	if x != -1 {
+		return x1 + x, y1
+	}
 
-		return x, y
+	// The real search
+	for y = y1; y < len(e.rows); y++ {
+		x = findSubstring(e.rows[y].chars, query)
+		if x != -1 {
+			return x, y
+		}
 	}
 
 	return -1, -1

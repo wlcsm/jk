@@ -128,7 +128,7 @@ var basicMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key(ctrl('f')): func(e SDK) error {
-		e.Find()
+		e.FindInteractive()
 		return nil
 	},
 	Key(ctrl('w')): func(e SDK) error {
@@ -162,6 +162,7 @@ func insertModeHandler(e SDK, k Key) (bool, error) {
 	}
 
 	e.InsertChars(e.CY(), e.CX(), rune(k))
+	e.SetPosX(e.CX() + 1)
 
 	return true, nil
 }
@@ -247,8 +248,21 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('b'): func(e SDK) error {
-		log.Printf("back position: %d, curr pos: %d", e.BackWord(), e.CX())
 		e.SetPosX(e.BackWord())
+		return nil
+	},
+	Key('n'): func(e SDK) error {
+		if len(e.LastSearch()) != 0 {
+			e.SetMessage("There is no last search")
+			return nil
+		}
+
+		x, y := e.Find(e.CX(), e.CY(), e.LastSearch())
+		if x != -1 {
+			e.SetPosX(x)
+			e.SetPosY(y)
+		}
+
 		return nil
 	},
 }
