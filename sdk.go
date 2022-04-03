@@ -11,7 +11,7 @@ import (
 type SDK interface {
 	InsertChars(y, x int, c ...rune)
 	DeleteRow(at int)
-	Find() error
+	Find()
 
 	Word() int
 	BackWord() int
@@ -257,14 +257,15 @@ func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) {
 		Name: PromptModeName,
 		Handler: func(e SDK, k Key) (bool, error) {
 			s, finished := cb(k)
-			e.SetMessage(prompt + s)
 
 			// Restore the previous keymapping when finished
 			if finished {
 				SetKeymapping(backup)
+				return true, nil
 			}
 
-			return finished, nil
+			e.SetMessage(prompt + s)
+			return false, nil
 		},
 	}})
 
@@ -272,18 +273,13 @@ func (e *Editor) Prompt(prompt string, cb func(k Key) (string, bool)) {
 	e.SetMessage(prompt)
 }
 
-/*** find ***/
-
-func (e *Editor) Find() error {
+func (e *Editor) Find() {
 	savedCx := e.cx
 	savedCy := e.cy
 	savedColOffset := e.colOffset
 	savedRowOffset := e.rowOffset
 
-	var (
-		query []rune
-		found bool
-	)
+	var query []rune
 
 	onKeyPress := func(k Key) (string, bool) {
 		switch k {
@@ -291,10 +287,18 @@ func (e *Editor) Find() error {
 			if len(query) != 0 {
 				query = query[:len(query)-1]
 			}
-		case keyEscape:
+		case keyEscape, Key(ctrl('q')):
+			// restore cursor position when the user cancels search
+			e.cx = savedCx
+			e.cy = savedCy
+			e.colOffset = savedColOffset
+			e.rowOffset = savedRowOffset
+
+			e.SetMessage("")
+
 			return "", true
 		case keyEnter, keyCarriageReturn:
-			found = true
+			e.SetMessage("")
 			return "", true
 		default:
 			if isPrintable(k) {
@@ -302,48 +306,41 @@ func (e *Editor) Find() error {
 			}
 		}
 
-		// search for query and set e.cy, e.cx, e.rowOffset values.
-		for i, row := range e.rows[e.cy:] {
-			index := findSubstring(row.chars, query)
-			if index == -1 {
-				continue
-			}
+		x, y := e.find(e.CY(), query)
+		if x == -1 {
+			e.cx = savedCx
+			e.cy = savedCy
+			e.colOffset = savedColOffset
+			e.rowOffset = savedRowOffset
 
-			// match found
-			e.cy += i
-			e.cx = index
-
-			// Try to make the text in the middle of the screen
-			e.SetRowOffset(e.cy - e.screenRows/2)
-
-			// highlight the matched string
-			savedHl := make([]SyntaxHL, len(row.hl))
-			copy(savedHl, row.hl)
-			for i := range query {
-				row.hl[index+i] = hlMatch
-			}
-
-			break
+			return string(query), false
 		}
 
-		return "Search: " + string(query), false
+		// Set cursor to beginning of match
+		e.cy = y
+		e.cx = x
+
+		// Try to make the text in the middle of the screen
+		e.SetRowOffset(e.cy - e.screenRows/2)
+
+		return string(query), false
 	}
 
-	// TODO come back here
 	e.Prompt("Search: ", onKeyPress)
+}
 
-	// Get rid of the search highlight
-	e.updateRow(e.cy)
+func (e *Editor) find(yOrig int, query []rune) (x, y int) {
+	// The real search
+	for y = yOrig; y < len(e.rows); y++ {
+		x = findSubstring(e.rows[y].chars, query)
+		if x == -1 {
+			continue
+		}
 
-	// restore cursor position when the user cancels search
-	if !found {
-		e.cx = savedCx
-		e.cy = savedCy
-		e.colOffset = savedColOffset
-		e.rowOffset = savedRowOffset
+		return x, y
 	}
 
-	return nil
+	return -1, -1
 }
 
 func (e *Editor) SetRowOffset(y int) {
@@ -364,8 +361,12 @@ func (e *Editor) SetColOffset(x int) {
 
 // return the place where the substring starts
 func findSubstring(text, query []rune) int {
+	if len(text) < len(query) {
+		return -1
+	}
+
 outer:
-	for i := range text {
+	for i := range text[:len(text)-len(query)] {
 		for j := range query {
 			if text[i+j] != query[j] {
 				continue outer

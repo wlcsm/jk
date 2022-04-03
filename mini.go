@@ -911,13 +911,11 @@ func (e *Editor) setWindowSize() error {
 var RestartEditor = fmt.Errorf("yes")
 
 func (e *Editor) rebuild() error {
-	log.Println("befoere rebuild")
 	cmd := exec.Command("make", "install")
 	cmd.Dir = "/home/wlcsm/go/src/github.com/mini"
 
-	log.Println("befoere rebuild")
 	l, err := cmd.Output()
-	log.Printf("rebuilding returned: %s", l)
+	log.Printf("build output: %s", l)
 	if err != nil {
 		return errors.Wrap(err, "here")
 	}

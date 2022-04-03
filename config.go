@@ -128,14 +128,7 @@ var basicMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key(ctrl('f')): func(e SDK) error {
-		err := e.Find()
-		if err == ErrPromptCanceled {
-			e.SetMessage("")
-		}
-
-		if err != nil {
-			return err
-		}
+		e.Find()
 		return nil
 	},
 	Key(ctrl('w')): func(e SDK) error {
