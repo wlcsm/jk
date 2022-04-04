@@ -13,6 +13,10 @@ type SDK interface {
 	DeleteRow(at int)
 	FindInteractive()
 	Find(x, y int, query []rune) (x1, y1 int)
+	FindBack(x, y int, query []rune) (x1, y1 int)
+
+	Row(y int) *[]rune
+	NumRows() int
 
 	LastSearch() []rune
 
@@ -33,10 +37,8 @@ type SDK interface {
 
 	// Set the absolute position of the cursor's y (wrapped)
 	SetPosY(y int)
-	SetPosMaxY()
 	// Set the absolute position of the cursor's x (wrapped)
 	SetPosX(x int)
-	SetPosMaxX()
 
 	// Set the absolute position of the cursor's x (wrapped)
 	WrapCursorX()
@@ -60,6 +62,18 @@ type SDK interface {
 	ScreenTop() int
 	ScreenLeft() int
 	ScreenRight() int
+}
+
+func (e *Editor) Row(y int) *[]rune {
+	if y < 0 || len(e.rows) <= y {
+		return nil
+	}
+
+	return &e.rows[y].chars
+}
+
+func (e *Editor) NumRows() int {
+	return len(e.rows)
 }
 
 type CompletionFunc func(a string) ([]CmplItem, error)
@@ -354,9 +368,24 @@ func (e *Editor) Find(x1, y1 int, query []rune) (x, y int) {
 	}
 
 	// The real search
-	for y = y1; y < len(e.rows); y++ {
-		x = findSubstring(e.rows[y].chars, query)
-		if x != -1 {
+	for y = y1 + 1; y < len(e.rows); y++ {
+		if x = findSubstring(e.rows[y].chars, query); x != -1 {
+			return x, y
+		}
+	}
+
+	return -1, -1
+}
+
+func (e *Editor) FindBack(x1, y1 int, query []rune) (x, y int) {
+	x = findSubstringBack(e.rows[y1].chars, query, x1)
+	if x != -1 {
+		return x, y1
+	}
+
+	// The real search
+	for y = y1 - 1; y >= 0; y-- {
+		if x = findSubstringBack(e.rows[y].chars, query, len(e.rows[y].chars)); x != -1 {
 			return x, y
 		}
 	}
@@ -387,7 +416,33 @@ func findSubstring(text, query []rune) int {
 	}
 
 outer:
-	for i := range text[:len(text)-len(query)] {
+	for i := range text[:len(text)-len(query)+1] {
+		for j := range query {
+			if text[i+j] != query[j] {
+				continue outer
+			}
+		}
+
+		return i
+	}
+
+	return -1
+}
+
+func findSubstringBack(text, query []rune, offset int) int {
+	if len(text) < len(query) {
+		return -1
+	}
+
+	log.Printf("query: %s, len: %d", string(query), len(query))
+	// Make sure text[i+j] doesn't overflow
+	if offset > len(text)-len(query) {
+		offset = len(text) - len(query)
+	}
+
+outer:
+	for i := offset; i >= 0; i-- {
+		log.Printf("text: %s, i: %d", string(text[i:i+len(query)]), i)
 		for j := range query {
 			if text[i+j] != query[j] {
 				continue outer
@@ -434,18 +489,6 @@ func (e *Editor) Delete(y, x1, x2 int) {
 
 func (e *Editor) SetPosY(y int) {
 	e.cy = y
-	e.WrapCursorY()
-}
-
-func (e *Editor) SetPosMaxY() {
-	e.cy = len(e.rows)
-	e.WrapCursorY()
-}
-
-func (e *Editor) SetPosMaxX() {
-	e.WrapCursorY()
-
-	e.cx = len(e.rows[e.cy].chars)
 }
 
 func (e *Editor) WrapCursorX() {
@@ -487,7 +530,6 @@ func (e *Editor) WrapCursorY() {
 
 func (e *Editor) SetPosX(x int) {
 	e.cx = x
-	e.WrapCursorX()
 }
 
 func (e *Editor) SetMode(m EditorMode) {

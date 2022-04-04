@@ -51,16 +51,6 @@ func basicHandler(e SDK, k Key) (bool, error) {
 }
 
 var basicMapping = map[Key]func(e SDK) error{
-	keyBackspace: func(e SDK) error {
-		x := e.CX()
-		if x != 0 {
-			e.Delete(e.CY(), x-1, x-1)
-		}
-
-		e.SetPosX(x - 1)
-
-		return nil
-	},
 	keyPageUp: func(e SDK) error {
 		e.SetPosY(e.ScreenTop())
 		return nil
@@ -170,10 +160,39 @@ func insertModeHandler(e SDK, k Key) (bool, error) {
 var insertModeMapping = map[Key]func(e SDK) error{
 	keyEnter: func(e SDK) error {
 		e.InsertRow(e.CX(), []rune(""))
+		e.SetPosY(e.CY() + 1)
 		return nil
 	},
 	keyCarriageReturn: func(e SDK) error {
-		e.InsertRow(e.CX(), []rune(""))
+		e.InsertRow(e.CY(), []rune(""))
+		e.SetPosY(e.CY() + 1)
+		return nil
+	},
+	keyDelete: func(e SDK) error {
+		x := e.CX()
+		if x != 0 {
+			e.Delete(e.CY(), x-1, x-1)
+			e.SetPosX(x - 1)
+		} else {
+			e.DeleteRow(e.CY())
+		}
+
+		return nil
+	},
+	keyBackspace: func(e SDK) error {
+		x, y := e.CX(), e.CY()
+		if x != 0 {
+			e.Delete(y, x-1, x-1)
+			e.SetPosX(x - 1)
+		} else {
+			e.DeleteRow(y)
+
+			if y != 0 {
+				e.SetPosY(y - 1)
+				e.SetPosX(len(*e.Row(y)))
+			}
+		}
+
 		return nil
 	},
 	Key(ctrl('c')): func(e SDK) error {
@@ -228,11 +247,11 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('$'): func(e SDK) error {
-		e.SetPosMaxX()
+		e.SetPosX(len(*e.Row(e.CY())))
 		return nil
 	},
 	Key('G'): func(e SDK) error {
-		e.SetPosMaxY()
+		e.SetPosY(e.NumRows())
 		return nil
 	},
 	Key('D'): func(e SDK) error {
@@ -252,15 +271,59 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('n'): func(e SDK) error {
-		if len(e.LastSearch()) != 0 {
+		if len(e.LastSearch()) == 0 {
 			e.SetMessage("There is no last search")
 			return nil
 		}
 
-		x, y := e.Find(e.CX(), e.CY(), e.LastSearch())
+		// e.CX()+1 not e.CX() because we want to find the next match,
+		// if we used e.CX() if the cursor was currently on a match it
+		// would never move
+		x, y := e.CX()+1, e.CY()
+		if row := *e.Row(y); x > len(row) {
+			log.Printf("h x, y: %d, %d", x, y)
+			if y == e.NumRows()-1 {
+				return nil
+			}
+
+			x = 0
+			y++
+		}
+
+		log.Printf("lastSearch: %s, x, y: %d, %d", string(e.LastSearch()), x, y)
+		x, y = e.Find(x, y, e.LastSearch())
+		log.Printf("x, y: %d, %d", x, y)
 		if x != -1 {
 			e.SetPosX(x)
 			e.SetPosY(y)
+		}
+
+		return nil
+	},
+	Key('N'): func(e SDK) error {
+		if len(e.LastSearch()) == 0 {
+			e.SetMessage("There is no last search")
+			return nil
+		}
+
+		// e.CX()-1 not e.CX() because we want to find the previous match,
+		// if we used e.CX() if the cursor was currently on a match it
+		// would never move
+		x, y := e.CX()-1, e.CY()
+		if x < 0 {
+			if y == 0 {
+				return nil
+			}
+
+			y--
+			x = len(*e.Row(y))
+		}
+
+		x, y = e.FindBack(x, y, e.LastSearch())
+		log.Printf("x, y: %d, %d", x, y)
+		if x != -1 {
+			e.SetPosY(y)
+			e.SetPosX(x)
 		}
 
 		return nil
