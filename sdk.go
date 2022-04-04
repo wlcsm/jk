@@ -15,7 +15,8 @@ type SDK interface {
 	Find(x, y int, query []rune) (x1, y1 int)
 	FindBack(x, y int, query []rune) (x1, y1 int)
 
-	Row(y int) *[]rune
+	Row(y int) []rune
+	SetRow(y int, chars []rune)
 	NumRows() int
 
 	LastSearch() []rune
@@ -47,7 +48,6 @@ type SDK interface {
 
 	SetMode(m EditorMode)
 
-	SetRow(at int, chars string)
 	InsertRow(at int, chars []rune)
 
 	CX() int
@@ -64,12 +64,8 @@ type SDK interface {
 	ScreenRight() int
 }
 
-func (e *Editor) Row(y int) *[]rune {
-	if y < 0 || len(e.rows) <= y {
-		return nil
-	}
-
-	return &e.rows[y].chars
+func (e *Editor) Row(y int) []rune {
+	return e.rows[y].chars
 }
 
 func (e *Editor) NumRows() int {
@@ -455,14 +451,10 @@ outer:
 	return -1
 }
 
-func (e *Editor) SetRow(at int, chars string) {
-	e.rows[at].chars = []rune(chars)
-	e.updateRow(at)
+func (e *Editor) SetRow(at int, chars []rune) {
+	e.rows[at].chars = chars
 
-	// Make sure to wrap the cursor
-	if e.cy == at {
-		RepositionCursor()
-	}
+	e.updateRow(at)
 }
 
 func (e *Editor) InsertRow(at int, chars []rune) {

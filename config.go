@@ -159,22 +159,40 @@ func insertModeHandler(e SDK, k Key) (bool, error) {
 
 var insertModeMapping = map[Key]func(e SDK) error{
 	keyEnter: func(e SDK) error {
-		e.InsertRow(e.CX(), []rune(""))
+		row := e.Row(e.CY())
+		row, row2 := row[:e.CX()], row[e.CX():]
+
+		e.SetRow(e.CY(), row)
+		e.InsertRow(e.CY()+1, row2)
+
 		e.SetPosY(e.CY() + 1)
+		e.SetPosX(0)
+
 		return nil
 	},
 	keyCarriageReturn: func(e SDK) error {
-		e.InsertRow(e.CY(), []rune(""))
+		row := e.Row(e.CY())
+		row, row2 := row[:e.CX()], row[e.CX():]
+
+		e.SetRow(e.CY(), row)
+		e.InsertRow(e.CY()+1, row2)
+
 		e.SetPosY(e.CY() + 1)
+		e.SetPosX(0)
+
 		return nil
 	},
 	keyDelete: func(e SDK) error {
-		x := e.CX()
+		x, y := e.CX(), e.CY()
 		if x != 0 {
-			e.Delete(e.CY(), x-1, x-1)
+			e.Delete(y, x-1, x-1)
 			e.SetPosX(x - 1)
 		} else {
-			e.DeleteRow(e.CY())
+			e.SetPosY(y - 1)
+			e.SetPosX(len(e.Row(y - 1)))
+
+			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
+			e.DeleteRow(y)
 		}
 
 		return nil
@@ -185,12 +203,11 @@ var insertModeMapping = map[Key]func(e SDK) error{
 			e.Delete(y, x-1, x-1)
 			e.SetPosX(x - 1)
 		} else {
-			e.DeleteRow(y)
+			e.SetPosY(y - 1)
+			e.SetPosX(len(e.Row(y - 1)))
 
-			if y != 0 {
-				e.SetPosY(y - 1)
-				e.SetPosX(len(*e.Row(y)))
-			}
+			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
+			e.DeleteRow(y)
 		}
 
 		return nil
@@ -247,7 +264,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('$'): func(e SDK) error {
-		e.SetPosX(len(*e.Row(e.CY())))
+		e.SetPosX(len(e.Row(e.CY())))
 		return nil
 	},
 	Key('G'): func(e SDK) error {
@@ -259,7 +276,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		return nil
 	},
 	Key('C'): func(e SDK) error {
-		e.SetRow(e.CY(), "")
+		e.SetRow(e.CY(), []rune(""))
 		return nil
 	},
 	Key('w'): func(e SDK) error {
@@ -280,7 +297,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		// if we used e.CX() if the cursor was currently on a match it
 		// would never move
 		x, y := e.CX()+1, e.CY()
-		if row := *e.Row(y); x > len(row) {
+		if row := e.Row(y); x > len(row) {
 			log.Printf("h x, y: %d, %d", x, y)
 			if y == e.NumRows()-1 {
 				return nil
@@ -316,7 +333,7 @@ var commandModeMapping = map[Key]func(e SDK) error{
 			}
 
 			y--
-			x = len(*e.Row(y))
+			x = len(e.Row(y))
 		}
 
 		x, y = e.FindBack(x, y, e.LastSearch())
