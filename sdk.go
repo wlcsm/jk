@@ -37,9 +37,9 @@ type SDK interface {
 	Delete(y, x1, x2 int)
 
 	// Set the absolute position of the cursor's y (wrapped)
-	SetPosY(y int)
+	SetY(y int)
 	// Set the absolute position of the cursor's x (wrapped)
-	SetPosX(x int)
+	SetX(x int)
 
 	// Set the absolute position of the cursor's x (wrapped)
 	WrapCursorX()
@@ -50,8 +50,8 @@ type SDK interface {
 
 	InsertRow(at int, chars []rune)
 
-	CX() int
-	CY() int
+	X() int
+	Y() int
 
 	Cols() int
 	Rows() int
@@ -142,7 +142,7 @@ func FindLeft(s []rune, f func(rune) bool) int {
 }
 
 func (e *Editor) Word() int {
-	x, y := e.CX(), e.CY()
+	x, y := e.X(), e.Y()
 	row := e.rows[y].chars
 
 	i := Find(row[x:], unicode.IsSpace)
@@ -159,7 +159,7 @@ func (e *Editor) Word() int {
 }
 
 func (e *Editor) BackWord() int {
-	x, y := e.CX(), e.CY()
+	x, y := e.X(), e.Y()
 	chars := e.rows[y].chars
 
 	i := FindLeft(chars[:x], unicode.IsSpace)
@@ -207,11 +207,11 @@ func (e *Editor) IsModified() bool {
 	return e.modified
 }
 
-func (e *Editor) CX() int {
+func (e *Editor) X() int {
 	return e.cx
 }
 
-func (e *Editor) CY() int {
+func (e *Editor) Y() int {
 	return e.cy
 }
 
@@ -479,7 +479,7 @@ func (e *Editor) Delete(y, x1, x2 int) {
 	e.updateRow(y)
 }
 
-func (e *Editor) SetPosY(y int) {
+func (e *Editor) SetY(y int) {
 	e.cy = y
 }
 
@@ -520,7 +520,7 @@ func (e *Editor) WrapCursorY() {
 	}
 }
 
-func (e *Editor) SetPosX(x int) {
+func (e *Editor) SetX(x int) {
 	e.cx = x
 }
 

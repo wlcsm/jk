@@ -43,39 +43,20 @@ var BasicMap = KeyMap{
 }
 
 func basicHandler(e SDK, k Key) (bool, error) {
-	if f, ok := basicMapping[k]; ok {
-		return true, f(e)
-	}
-
-	return false, nil
-}
-
-var basicMapping = map[Key]func(e SDK) error{
-	keyPageUp: func(e SDK) error {
-		e.SetPosY(e.ScreenTop())
-		return nil
-	},
-	keyPageDown: func(e SDK) error {
-		e.SetPosY(e.ScreenBottom())
-		return nil
-	},
-	keyArrowUp: func(e SDK) error {
-		e.SetPosY(e.CY() - 1)
-		return nil
-	},
-	keyArrowDown: func(e SDK) error {
-		e.SetPosY(e.CY() + 1)
-		return nil
-	},
-	keyArrowLeft: func(e SDK) error {
-		e.SetPosX(e.CX() - 1)
-		return nil
-	},
-	keyArrowRight: func(e SDK) error {
-		e.SetPosX(e.CX() + 1)
-		return nil
-	},
-	Key(ctrl('q')): func(e SDK) error {
+	switch k {
+	case keyPageUp:
+		e.SetY(e.ScreenTop())
+	case keyPageDown:
+		e.SetY(e.ScreenBottom())
+	case keyArrowUp:
+		e.SetY(e.Y() - 1)
+	case keyArrowDown:
+		e.SetY(e.Y() + 1)
+	case keyArrowLeft:
+		e.SetX(e.X() - 1)
+	case keyArrowRight:
+		e.SetX(e.X() + 1)
+	case Key(ctrl('q')):
 		if e.IsModified() {
 			e.Prompt("WARNING!!! File has unsaved changes. Press Ctrl-Q again to quit.",
 				func(k Key) (string, bool) {
@@ -86,27 +67,22 @@ var basicMapping = map[Key]func(e SDK) error{
 
 					return "", true
 				})
-
-			return nil
 		} else {
 			ClearScreen()
 			RepositionCursor()
 
-			return ErrQuitEditor
+			return true, ErrQuitEditor
 		}
-	},
-	Key(ctrl('s')): func(e SDK) error {
+	case Key(ctrl('s')):
 		log.Printf("attempting to save: %s\n", e.Filename())
 		if err := e.Save(); err != nil {
-			return err
+			return true, err
 		}
 
 		log.Println("should have saved")
 		e.SetMessage("saved file: %s", e.Filename())
-		return nil
-	},
-	// Open a new file
-	Key(ctrl('e')): func(e SDK) error {
+
+	case Key(ctrl('e')):
 		e.StaticPrompt("File name: ", func(res string) error {
 			if len(res) == 0 {
 				return fmt.Errorf("No file name")
@@ -115,29 +91,23 @@ var basicMapping = map[Key]func(e SDK) error{
 			return e.OpenFile(res)
 		}, FileCompletion)
 
-		return nil
-	},
-	Key(ctrl('f')): func(e SDK) error {
+	case Key(ctrl('f')):
 		e.FindInteractive()
-		return nil
-	},
-	Key(ctrl('w')): func(e SDK) error {
-		e.Delete(e.CY(), e.BackWord(), e.CX()-1)
-		return nil
-	},
-	Key(ctrl('r')): func(e SDK) error {
-		return RestartEditor
-	},
-	Key(ctrl('u')): func(e SDK) error {
-		e.SetPosY(e.CY() - (e.Rows() / 2))
+	case Key(ctrl('w')):
+		e.Delete(e.Y(), e.BackWord(), e.X()-1)
+	case Key(ctrl('r')):
+		return true, RestartEditor
+	case Key(ctrl('u')):
+		e.SetY(e.Y() - (e.Rows() / 2))
 		e.CenterCursor()
-		return nil
-	},
-	Key(ctrl('d')): func(e SDK) error {
-		e.SetPosY(e.CY() + (e.Rows() / 2))
+	case Key(ctrl('d')):
+		e.SetY(e.Y() + (e.Rows() / 2))
 		e.CenterCursor()
-		return nil
-	},
+	default:
+		return false, nil
+	}
+
+	return true, nil
 }
 
 var InsertModeMap = KeyMap{
@@ -146,76 +116,63 @@ var InsertModeMap = KeyMap{
 }
 
 func insertModeHandler(e SDK, k Key) (bool, error) {
-	if f, ok := insertModeMapping[k]; ok {
-		err := f(e)
-		return true, err
+	switch k {
+	case keyEnter:
+		row := e.Row(e.Y())
+		row, row2 := row[:e.X()], row[e.X():]
+
+		e.SetRow(e.Y(), row)
+		e.InsertRow(e.Y()+1, row2)
+
+		e.SetY(e.Y() + 1)
+		e.SetX(0)
+
+	case keyCarriageReturn:
+		row := e.Row(e.Y())
+		row, row2 := row[:e.X()], row[e.X():]
+
+		e.SetRow(e.Y(), row)
+		e.InsertRow(e.Y()+1, row2)
+
+		e.SetY(e.Y() + 1)
+		e.SetX(0)
+
+	case keyDelete:
+		x, y := e.X(), e.Y()
+		if x != 0 {
+			e.Delete(y, x-1, x-1)
+			e.SetX(x - 1)
+		} else {
+			e.SetY(y - 1)
+			e.SetX(len(e.Row(y - 1)))
+
+			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
+			e.DeleteRow(y)
+		}
+
+	case keyBackspace:
+		x, y := e.X(), e.Y()
+		if x != 0 {
+			e.Delete(y, x-1, x-1)
+			e.SetX(x - 1)
+		} else {
+			e.SetY(y - 1)
+			e.SetX(len(e.Row(y - 1)))
+
+			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
+			e.DeleteRow(y)
+		}
+
+	case Key(ctrl('c')):
+		e.SetMode(CommandMode)
+	default:
+		if isPrintable(k) {
+			e.InsertChars(e.Y(), e.X(), rune(k))
+			e.SetX(e.X() + 1)
+		}
 	}
 
-	e.InsertChars(e.CY(), e.CX(), rune(k))
-	e.SetPosX(e.CX() + 1)
-
 	return true, nil
-}
-
-var insertModeMapping = map[Key]func(e SDK) error{
-	keyEnter: func(e SDK) error {
-		row := e.Row(e.CY())
-		row, row2 := row[:e.CX()], row[e.CX():]
-
-		e.SetRow(e.CY(), row)
-		e.InsertRow(e.CY()+1, row2)
-
-		e.SetPosY(e.CY() + 1)
-		e.SetPosX(0)
-
-		return nil
-	},
-	keyCarriageReturn: func(e SDK) error {
-		row := e.Row(e.CY())
-		row, row2 := row[:e.CX()], row[e.CX():]
-
-		e.SetRow(e.CY(), row)
-		e.InsertRow(e.CY()+1, row2)
-
-		e.SetPosY(e.CY() + 1)
-		e.SetPosX(0)
-
-		return nil
-	},
-	keyDelete: func(e SDK) error {
-		x, y := e.CX(), e.CY()
-		if x != 0 {
-			e.Delete(y, x-1, x-1)
-			e.SetPosX(x - 1)
-		} else {
-			e.SetPosY(y - 1)
-			e.SetPosX(len(e.Row(y - 1)))
-
-			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
-			e.DeleteRow(y)
-		}
-
-		return nil
-	},
-	keyBackspace: func(e SDK) error {
-		x, y := e.CX(), e.CY()
-		if x != 0 {
-			e.Delete(y, x-1, x-1)
-			e.SetPosX(x - 1)
-		} else {
-			e.SetPosY(y - 1)
-			e.SetPosX(len(e.Row(y - 1)))
-
-			e.SetRow(y-1, append(e.Row(y-1), e.Row(y)...))
-			e.DeleteRow(y)
-		}
-
-		return nil
-	},
-	Key(ctrl('c')): func(e SDK) error {
-		e.SetMode(CommandMode)
-		return nil
-	},
 }
 
 var CommandModeMap = KeyMap{
@@ -224,83 +181,49 @@ var CommandModeMap = KeyMap{
 }
 
 func commandModeHandler(e SDK, k Key) (bool, error) {
-	if f, ok := commandModeMapping[k]; ok {
-		err := f(e)
-		return true, err
-	}
-
-	return false, nil
-}
-
-var commandModeMapping = map[Key]func(e SDK) error{
-	Key('j'): func(e SDK) error {
-		e.SetPosY(e.CY() + 1)
-		return nil
-	},
-	Key('k'): func(e SDK) error {
-		e.SetPosY(e.CY() - 1)
-		return nil
-	},
-	Key('h'): func(e SDK) error {
-		e.SetPosX(e.CX() - 1)
-		return nil
-	},
-	Key('l'): func(e SDK) error {
-		e.SetPosX(e.CX() + 1)
-		return nil
-	},
-	Key('i'): func(e SDK) error {
+	switch k {
+	case Key('j'):
+		e.SetY(e.Y() + 1)
+	case Key('k'):
+		e.SetY(e.Y() - 1)
+	case Key('h'):
+		e.SetX(e.X() - 1)
+	case Key('l'):
+		e.SetX(e.X() + 1)
+	case Key('i'):
 		e.SetMode(InsertMode)
-		return nil
-	},
-	Key('o'): func(e SDK) error {
-		e.InsertRow(e.CY()+1, []rune(""))
-		e.SetPosY(e.CY() + 1)
+	case Key('o'):
+		e.InsertRow(e.Y()+1, []rune(""))
+		e.SetY(e.Y() + 1)
 		e.SetMode(InsertMode)
-		return nil
-	},
-	Key('0'): func(e SDK) error {
-		e.SetPosX(0)
-		return nil
-	},
-	Key('$'): func(e SDK) error {
-		e.SetPosX(len(e.Row(e.CY())))
-		return nil
-	},
-	Key('G'): func(e SDK) error {
-		e.SetPosY(e.NumRows())
-		return nil
-	},
-	Key('D'): func(e SDK) error {
-		e.DeleteRow(e.CY())
-		return nil
-	},
-	Key('C'): func(e SDK) error {
-		e.SetRow(e.CY(), []rune(""))
-		return nil
-	},
-	Key('w'): func(e SDK) error {
-		e.SetPosX(e.Word())
-		return nil
-	},
-	Key('b'): func(e SDK) error {
-		e.SetPosX(e.BackWord())
-		return nil
-	},
-	Key('n'): func(e SDK) error {
+	case Key('0'):
+		e.SetX(0)
+	case Key('$'):
+		e.SetX(len(e.Row(e.Y())))
+	case Key('G'):
+		e.SetY(e.NumRows())
+	case Key('D'):
+		e.DeleteRow(e.Y())
+	case Key('C'):
+		e.SetRow(e.Y(), []rune(""))
+	case Key('w'):
+		e.SetX(e.Word())
+	case Key('b'):
+		e.SetX(e.BackWord())
+	case Key('n'):
 		if len(e.LastSearch()) == 0 {
 			e.SetMessage("There is no last search")
-			return nil
+			break
 		}
 
-		// e.CX()+1 not e.CX() because we want to find the next match,
-		// if we used e.CX() if the cursor was currently on a match it
+		// e.X()+1 not e.X() because we want to find the next match,
+		// if we used e.X() if the cursor was currently on a match it
 		// would never move
-		x, y := e.CX()+1, e.CY()
+		x, y := e.X()+1, e.Y()
 		if row := e.Row(y); x > len(row) {
 			log.Printf("h x, y: %d, %d", x, y)
 			if y == e.NumRows()-1 {
-				return nil
+				break
 			}
 
 			x = 0
@@ -311,25 +234,22 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		x, y = e.Find(x, y, e.LastSearch())
 		log.Printf("x, y: %d, %d", x, y)
 		if x != -1 {
-			e.SetPosX(x)
-			e.SetPosY(y)
+			e.SetX(x)
+			e.SetY(y)
 		}
-
-		return nil
-	},
-	Key('N'): func(e SDK) error {
+	case Key('N'):
 		if len(e.LastSearch()) == 0 {
 			e.SetMessage("There is no last search")
-			return nil
+			break
 		}
 
-		// e.CX()-1 not e.CX() because we want to find the previous match,
-		// if we used e.CX() if the cursor was currently on a match it
+		// e.X()-1 not e.X() because we want to find the previous match,
+		// if we used e.X() if the cursor was currently on a match it
 		// would never move
-		x, y := e.CX()-1, e.CY()
+		x, y := e.X()-1, e.Y()
 		if x < 0 {
 			if y == 0 {
-				return nil
+				break
 			}
 
 			y--
@@ -339,10 +259,12 @@ var commandModeMapping = map[Key]func(e SDK) error{
 		x, y = e.FindBack(x, y, e.LastSearch())
 		log.Printf("x, y: %d, %d", x, y)
 		if x != -1 {
-			e.SetPosY(y)
-			e.SetPosX(x)
+			e.SetY(y)
+			e.SetX(x)
 		}
+	default:
+		return false, nil
+	}
 
-		return nil
-	},
+	return true, nil
 }
